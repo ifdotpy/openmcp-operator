@@ -229,7 +229,7 @@ func (r *ManagedControlPlaneReconciler) handleCreateOrUpdate(ctx context.Context
 		corev2alpha1.MCPNamespaceLabel: mcp.Namespace,
 		apiconst.ManagedByLabel:        ControllerName,
 	}
-	platformNamespace, err := libutils.StableMCPNamespace(mcp.Name, mcp.Namespace)
+	platformNamespace, err := libutils.StableMCPNamespaceCtx(ctx, mcp.Name, mcp.Namespace)
 	if err != nil {
 		rr.ReconcileError = errutils.WithReason(err, cconst.ReasonInternalError)
 		createCon(corev2alpha1.ConditionMeta, metav1.ConditionFalse, rr.ReconcileError.Reason(), rr.ReconcileError.Error())
@@ -421,7 +421,7 @@ func (r *ManagedControlPlaneReconciler) handleDelete(ctx context.Context, mcp *c
 	log.Debug("All service resources deleted")
 
 	// delete AccessRequests and related secrets
-	platformNamespace, err := libutils.StableMCPNamespace(mcp.Name, mcp.Namespace)
+	platformNamespace, err := libutils.StableMCPNamespaceCtx(ctx, mcp.Name, mcp.Namespace)
 	if err != nil {
 		rr.ReconcileError = errutils.WithReason(err, cconst.ReasonInternalError)
 		createCon(corev2alpha1.ConditionMeta, metav1.ConditionFalse, rr.ReconcileError.Reason(), rr.ReconcileError.Error())

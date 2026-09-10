@@ -61,6 +61,8 @@ func NewRunCommand(po *options.PersistentOptions) *cobra.Command {
 }
 
 func (o *RunOptions) AddFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.KCPEndpointSlice, "kcp-endpoint-slice", "", "Multicluster (kcp) mode: name of the APIExportEndpointSlice serving the tenant workspaces. Empty disables the mode.")
+	cmd.Flags().StringVar(&o.KCPKubeconfig, "kcp-kubeconfig", "", "Multicluster (kcp) mode: kubeconfig path for the workspace holding the APIExportEndpointSlice.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	cmd.Flags().StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,6 +95,14 @@ type RawRunOptions struct {
 }
 
 type RunOptions struct {
+	// KCPEndpointSlice enables the multicluster (kcp) deployment mode: the
+	// name of the APIExportEndpointSlice whose virtual workspace serves the
+	// tenant workspaces. Empty = classic single-onboarding-cluster mode.
+	KCPEndpointSlice string
+	// KCPKubeconfig is the kubeconfig path for the kcp workspace holding the
+	// APIExportEndpointSlice (multicluster mode only).
+	KCPKubeconfig string
+
 	*options.PersistentOptions
 	RawRunOptions
 
@@ -231,6 +241,10 @@ func (o *RunOptions) Run(ctx context.Context) error {
 	setupLog.Info("Environment", "value", o.Environment)
 	setupLog.Info("Provider name", "value", o.ProviderName)
 	ctx = logging.NewContext(ctx, setupLog)
+
+	if o.KCPEndpointSlice != "" {
+		return o.runMulticluster(ctx, setupLog)
+	}
 
 	// get access to the onboarding cluster
 	setupLog.Info("Getting access to the onboarding cluster")

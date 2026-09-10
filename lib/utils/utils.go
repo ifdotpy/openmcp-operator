@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/openmcp-project/controller-utils/pkg/controller"
@@ -79,4 +80,32 @@ func WebhookSecretName(providerName string) (string, error) {
 		return "", fmt.Errorf("error computing webhook secret name: %w", err)
 	}
 	return base + suffix, nil
+}
+
+// tenantClusterCtxKey carries the logical (tenant) cluster name through the
+// context in the multicluster deployment mode.
+type tenantClusterCtxKey struct{}
+
+// WithTenantCluster returns a context carrying the tenant cluster name.
+func WithTenantCluster(ctx context.Context, cluster string) context.Context {
+	return context.WithValue(ctx, tenantClusterCtxKey{}, cluster)
+}
+
+// TenantClusterFrom returns the tenant cluster name from the context, or "".
+func TenantClusterFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(tenantClusterCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// StableMCPNamespaceCtx is StableMCPNamespace with the tenant cluster from the
+// context folded into the namespace input. In the classic single-onboarding
+// mode (no tenant cluster in the context) it is identical to
+// StableMCPNamespace, so existing namespaces stay stable.
+func StableMCPNamespaceCtx(ctx context.Context, onboardingName, onboardingNamespace string) (string, error) {
+	if c := TenantClusterFrom(ctx); c != "" {
+		onboardingNamespace = c + "_" + onboardingNamespace
+	}
+	return StableMCPNamespace(onboardingName, onboardingNamespace)
 }
