@@ -64,9 +64,15 @@ func NewInitCommand(po *options.PersistentOptions) *cobra.Command {
 
 type InitOptions struct {
 	*options.PersistentOptions
+	// KCPMode skips the onboarding-cluster initialization entirely: in the
+	// multicluster (kcp) deployment mode there is no onboarding cluster, and
+	// the tenant-facing API surface is provisioned in kcp instead.
+	KCPMode bool
 }
 
-func (o *InitOptions) AddFlags(cmd *cobra.Command) {}
+func (o *InitOptions) AddFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&o.KCPMode, "kcp-mode", false, "Skip onboarding cluster initialization (multicluster/kcp deployment mode).")
+}
 
 func (o *InitOptions) Complete(ctx context.Context) error {
 	if err := o.PersistentOptions.Complete(ctx); err != nil {
@@ -79,6 +85,10 @@ func (o *InitOptions) Complete(ctx context.Context) error {
 }
 
 func (o *InitOptions) Run(ctx context.Context) error {
+	if o.KCPMode {
+		o.Log.Info("kcp mode: skipping onboarding cluster initialization")
+		return nil
+	}
 	if err := o.PlatformCluster.InitializeClient(install.InstallOperatorAPIsPlatform(runtime.NewScheme())); err != nil {
 		return err
 	}
