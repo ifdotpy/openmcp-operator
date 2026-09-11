@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -48,6 +49,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 
 	scheme := runtime.NewScheme()
 	install.InstallOperatorAPIsOnboarding(scheme)
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kcpapisv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(kcpcorev1alpha1.AddToScheme(scheme))
 
@@ -128,6 +130,12 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		}))
 	if err != nil {
 		return fmt.Errorf("unable to build multicluster controller: %w", err)
+	}
+
+	// Enabling the service in an account (APIBinding) engages its workspace; create
+	// the account's default ControlPlane then, once.
+	if err := mcMgr.Add(&defaultControlPlaneBootstrapper{log: setupLog}); err != nil {
+		return fmt.Errorf("unable to add default ControlPlane bootstrapper: %w", err)
 	}
 
 	if err := mcMgr.GetLocalManager().AddHealthzCheck("healthz", healthz.Ping); err != nil {
