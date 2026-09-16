@@ -61,6 +61,21 @@ func NewRunCommand(po *options.PersistentOptions) *cobra.Command {
 }
 
 func (o *RunOptions) AddFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.KCPEndpointSlice, "kcp-endpoint-slice", "", "Multicluster (kcp) mode: name of the APIExportEndpointSlice serving the tenant workspaces. Empty disables the mode.")
+	cmd.Flags().StringVar(&o.KCPKubeconfig, "kcp-kubeconfig", "", "Multicluster (kcp) mode: kubeconfig path for the workspace holding the APIExportEndpointSlice.")
+	cmd.Flags().StringVar(&o.KCPFluxProviderImage, "kcp-flux-provider-image", "", "Multicluster (kcp) mode: upstream Flux service-provider image. Empty disables its per-account deployment.")
+	cmd.Flags().StringVar(&o.KCPExternalSecretsProviderImage, "kcp-external-secrets-provider-image", "", "Multicluster (kcp) mode: upstream External Secrets service-provider image. Empty disables its per-account deployment.")
+	cmd.Flags().StringVar(&o.KCPFluxProviderName, "kcp-flux-provider-name", "ocp-kcp-hosted-flux", "Multicluster (kcp) mode: shared Flux ProviderConfig name.")
+	cmd.Flags().StringVar(&o.KCPExternalSecretsProviderName, "kcp-external-secrets-provider-name", "ocp-kcp-hosted-external-secrets", "Multicluster (kcp) mode: shared External Secrets ProviderConfig name.")
+	cmd.Flags().DurationVar(&o.KCPAccountReconcileInterval, "kcp-account-reconcile-interval", 5*time.Second, "Multicluster (kcp) mode: interval for account runtime reconciliation.")
+	cmd.Flags().DurationVar(&o.KCPAccountCleanupDelay, "kcp-account-cleanup-delay", time.Minute, "Multicluster (kcp) mode: delay before platform runtime removal after disengagement.")
+	cmd.Flags().DurationVar(&o.KCPAccountTokenLifetime, "kcp-account-token-lifetime", time.Hour, "Multicluster (kcp) mode: lifetime of account-only provider credentials.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardAddress, "kcp-disconnect-guard-address", "", "Multicluster (kcp) mode: HTTPS listen address for the APIBinding deletion guard.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardURL, "kcp-disconnect-guard-url", "", "Multicluster (kcp) mode: public HTTPS URL of the APIBinding deletion guard.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardCert, "kcp-disconnect-guard-cert", "", "Multicluster (kcp) mode: guard TLS certificate file.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardKey, "kcp-disconnect-guard-key", "", "Multicluster (kcp) mode: guard TLS private key file.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardCA, "kcp-disconnect-guard-ca", "", "Multicluster (kcp) mode: guard CA bundle file.")
+	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "ocp", "Multicluster (kcp) mode: APIBinding protected by the deletion guard.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	cmd.Flags().StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -77,6 +92,19 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 }
 
 type RawRunOptions struct {
+	KCPFluxProviderImage            string        `json:"kcp-flux-provider-image"`
+	KCPExternalSecretsProviderImage string        `json:"kcp-external-secrets-provider-image"`
+	KCPFluxProviderName             string        `json:"kcp-flux-provider-name"`
+	KCPExternalSecretsProviderName  string        `json:"kcp-external-secrets-provider-name"`
+	KCPAccountReconcileInterval     time.Duration `json:"kcp-account-reconcile-interval"`
+	KCPAccountCleanupDelay          time.Duration `json:"kcp-account-cleanup-delay"`
+	KCPAccountTokenLifetime         time.Duration `json:"kcp-account-token-lifetime"`
+	KCPDisconnectGuardAddress       string        `json:"kcp-disconnect-guard-address"`
+	KCPDisconnectGuardURL           string        `json:"kcp-disconnect-guard-url"`
+	KCPDisconnectGuardCert          string        `json:"kcp-disconnect-guard-cert"`
+	KCPDisconnectGuardKey           string        `json:"kcp-disconnect-guard-key"`
+	KCPDisconnectGuardCA            string        `json:"kcp-disconnect-guard-ca"`
+	KCPBindingName                  string        `json:"kcp-binding-name"`
 	// kubebuilder default flags
 	MetricsAddr          string `json:"metrics-bind-address"`
 	MetricsCertPath      string `json:"metrics-cert-path"`
@@ -93,6 +121,14 @@ type RawRunOptions struct {
 }
 
 type RunOptions struct {
+	// KCPEndpointSlice enables the multicluster (kcp) deployment mode: the
+	// name of the APIExportEndpointSlice whose virtual workspace serves the
+	// tenant workspaces. Empty = classic single-onboarding-cluster mode.
+	KCPEndpointSlice string
+	// KCPKubeconfig is the kubeconfig path for the kcp workspace holding the
+	// APIExportEndpointSlice (multicluster mode only).
+	KCPKubeconfig string
+
 	*options.PersistentOptions
 	RawRunOptions
 
@@ -127,6 +163,33 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 	}
 	if o.ProviderName == "" {
 		return fmt.Errorf("provider-name must not be empty")
+	}
+	if o.KCPEndpointSlice != "" {
+		if o.KCPKubeconfig == "" {
+			return fmt.Errorf("kcp-kubeconfig must not be empty in multicluster mode")
+		}
+		if o.KCPAccountReconcileInterval <= 0 {
+			return fmt.Errorf("kcp-account-reconcile-interval must be positive")
+		}
+		if o.KCPAccountCleanupDelay < 0 {
+			return fmt.Errorf("kcp-account-cleanup-delay must not be negative")
+		}
+		if o.KCPAccountTokenLifetime < 10*time.Minute || o.KCPAccountTokenLifetime > 24*time.Hour {
+			return fmt.Errorf("kcp-account-token-lifetime must be between 10m and 24h")
+		}
+		guard := []string{o.KCPDisconnectGuardAddress, o.KCPDisconnectGuardURL, o.KCPDisconnectGuardCert, o.KCPDisconnectGuardKey}
+		configured := 0
+		for _, value := range guard {
+			if value != "" {
+				configured++
+			}
+		}
+		if configured != 0 && configured != len(guard) {
+			return fmt.Errorf("the disconnect guard address, URL, certificate, and key must be set together")
+		}
+		if configured > 0 && o.KCPBindingName == "" {
+			return fmt.Errorf("kcp-binding-name must not be empty")
+		}
 	}
 	setupLog = o.Log.WithName("setup")
 	ctrl.SetLogger(o.Log.Logr())
@@ -231,6 +294,10 @@ func (o *RunOptions) Run(ctx context.Context) error {
 	setupLog.Info("Environment", "value", o.Environment)
 	setupLog.Info("Provider name", "value", o.ProviderName)
 	ctx = logging.NewContext(ctx, setupLog)
+
+	if o.KCPEndpointSlice != "" {
+		return o.runMulticluster(ctx, setupLog)
+	}
 
 	// get access to the onboarding cluster
 	setupLog.Info("Getting access to the onboarding cluster")
