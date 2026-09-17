@@ -50,77 +50,77 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func testRuntime(t *testing.T) (*accountRuntime, client.Client, client.Client) {
+func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client) {
 	t.Helper()
 	scheme := testScheme(t)
 	platform := clientfake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&clustersv1alpha1.Cluster{}, &clustersv1alpha1.ClusterRequest{}, &clustersv1alpha1.AccessRequest{}, &providerv1alpha1.ServiceProvider{}).
 		Build()
-	account := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev2alpha1.ControlPlane{}).Build()
+	workspace := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev2alpha1.ControlPlane{}).Build()
 	log, err := logging.New(&logging.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &accountRuntime{
+	r := &workspaceRuntime{
 		log:           log,
 		platform:      controllerclusters.NewTestClusterFromClient("platform", platform),
 		environment:   "test",
-		bindingName:   "ocp",
+		bindingName:   "services",
 		tokenLifetime: time.Hour,
-		providers: []accountProvider{
-			{name: "flux", image: "example.test/flux:v1", providerName: "flux-config", resource: metav1.GroupVersionKind{Group: "flux.services.open-control-plane.io", Version: "v1alpha1", Kind: "Flux"}},
-			{name: "external-secrets", image: "example.test/eso:v1", providerName: "eso-config", resource: metav1.GroupVersionKind{Group: "external-secrets.services.open-control-plane.io", Version: "v1alpha1", Kind: "ExternalSecretsOperator"}},
+		providers: []workspaceProvider{
+			{Name: "example-a", Image: "example.test/a:v1", ProviderName: "example-a-config", Resource: metav1.GroupVersionKind{Group: "a.services.example.io", Version: "v1alpha1", Kind: "ServiceA"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"a.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
+			{Name: "example-b", Image: "example.test/b:v1", ProviderName: "example-b-config", Resource: metav1.GroupVersionKind{Group: "b.services.example.io", Version: "v1alpha1", Kind: "ServiceB"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"b.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
 		},
 	}
-	return r, platform, account
+	return r, platform, workspace
 }
 
 func testBindingOwner() metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: kcpapisv1alpha1.SchemeGroupVersion.String(),
 		Kind:       "APIBinding",
-		Name:       "ocp",
+		Name:       "services",
 		UID:        types.UID("binding-1"),
 	}
 }
 
-func TestAccountNamespaceIsStableAndDistinct(t *testing.T) {
-	a := accountControlPlaneNamespace(multicluster.ClusterName("root:orgs:a"))
-	b := accountControlPlaneNamespace(multicluster.ClusterName("root:orgs:b"))
+func TestWorkspaceNamespaceIsStableAndDistinct(t *testing.T) {
+	a := workspaceControlPlaneNamespace(multicluster.ClusterName("root:tenants:a"))
+	b := workspaceControlPlaneNamespace(multicluster.ClusterName("root:tenants:b"))
 	if a == b {
-		t.Fatalf("different accounts got the same namespace %q", a)
+		t.Fatalf("different workspaces got the same namespace %q", a)
 	}
-	if got := accountControlPlaneNamespace(multicluster.ClusterName("root:orgs:a")); got != a {
+	if got := workspaceControlPlaneNamespace(multicluster.ClusterName("root:tenants:a")); got != a {
 		t.Fatalf("namespace changed: %q != %q", got, a)
 	}
 }
 
-func TestAccountRuntimeUsesAccountAsOnlyCluster(t *testing.T) {
+func TestWorkspaceRuntimeUsesWorkspaceAsOnlyCluster(t *testing.T) {
 	ctx := context.Background()
-	r, platform, account := testRuntime(t)
-	accountName := multicluster.ClusterName("root:orgs:demo")
-	accountNamespace := accountControlPlaneNamespace(accountName)
+	r, platform, workspace := testRuntime(t)
+	workspaceName := multicluster.ClusterName("root:tenants:demo")
+	workspaceNamespace := workspaceControlPlaneNamespace(workspaceName)
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
-	if err := bootstrap.ensureDefault(ctx, account, accountNamespace, testBindingOwner()); err != nil {
+	if err := bootstrap.ensureDefault(ctx, workspace, workspaceNamespace, testBindingOwner()); err != nil {
 		t.Fatal(err)
 	}
 	ns := &corev1.Namespace{}
-	if err := account.Get(ctx, client.ObjectKey{Name: accountNamespace}, ns); err != nil {
+	if err := workspace.Get(ctx, client.ObjectKey{Name: workspaceNamespace}, ns); err != nil {
 		t.Fatal(err)
 	}
 	if len(ns.OwnerReferences) != 1 || ns.OwnerReferences[0].UID != testBindingOwner().UID {
 		t.Fatalf("control-plane namespace is not owned by the APIBinding: %#v", ns.OwnerReferences)
 	}
 	cp := &corev2alpha1.ControlPlane{}
-	if err := account.Get(ctx, client.ObjectKey{Name: defaultControlPlaneName, Namespace: accountNamespace}, cp); err != nil {
+	if err := workspace.Get(ctx, client.ObjectKey{Name: defaultControlPlaneName, Namespace: workspaceNamespace}, cp); err != nil {
 		t.Fatal(err)
 	}
 
-	platformNamespace, err := platformNamespaceForAccount(accountName)
+	platformNamespace, err := platformNamespaceForWorkspace(workspaceName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.ensurePlatformRuntime(ctx, accountName, platformNamespace, "https://kcp.example/clusters/root:orgs:demo"); err != nil {
+	if err := r.ensurePlatformRuntime(ctx, workspaceName, platformNamespace, "https://kcp.example/clusters/root:tenants:demo"); err != nil {
 		t.Fatal(err)
 	}
 	request := &clustersv1alpha1.ClusterRequest{
@@ -136,14 +136,14 @@ func TestAccountRuntimeUsesAccountAsOnlyCluster(t *testing.T) {
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(request), request); err != nil {
 		t.Fatal(err)
 	}
-	if !request.Status.IsGranted() || request.Status.Cluster == nil || request.Status.Cluster.Name != accountClusterName {
-		t.Fatalf("request was not granted to the account Cluster: %#v", request.Status)
+	if !request.Status.IsGranted() || request.Status.Cluster == nil || request.Status.Cluster.Name != workspaceClusterName {
+		t.Fatalf("request was not granted to the workspace Cluster: %#v", request.Status)
 	}
 	clusters := &clustersv1alpha1.ClusterList{}
 	if err := platform.List(ctx, clusters, client.InNamespace(platformNamespace)); err != nil {
 		t.Fatal(err)
 	}
-	if len(clusters.Items) != 1 || clusters.Items[0].Name != accountClusterName {
+	if len(clusters.Items) != 1 || clusters.Items[0].Name != workspaceClusterName {
 		t.Fatalf("runtime created nested clusters: %#v", clusters.Items)
 	}
 	deployments := &appsv1.DeploymentList{}
@@ -154,13 +154,13 @@ func TestAccountRuntimeUsesAccountAsOnlyCluster(t *testing.T) {
 		t.Fatalf("got %d provider deployments, want 2", len(deployments.Items))
 	}
 	clusterRoles := &rbacv1.ClusterRoleList{}
-	if err := platform.List(ctx, clusterRoles, client.MatchingLabels{accountRuntimeLabel: platformNamespace}); err != nil {
+	if err := platform.List(ctx, clusterRoles, client.MatchingLabels{workspaceRuntimeLabel: platformNamespace}); err != nil {
 		t.Fatal(err)
 	}
-	if len(clusterRoles.Items) != 1 || !allows(clusterRoles.Items[0].Rules, "", "namespaces", "get") {
+	if len(clusterRoles.Items) != 1 || !allows(clusterRoles.Items[0].Rules, "", "namespaces", "get") || !allows(clusterRoles.Items[0].Rules, "a.services.example.io", "providerconfigs", "list") {
 		t.Fatalf("provider cannot inspect its platform namespace: %#v", clusterRoles.Items)
 	}
-	for name, kind := range map[string]string{"flux-config": "Flux", "eso-config": "ExternalSecretsOperator"} {
+	for name, kind := range map[string]string{"example-a-config": "ServiceA", "example-b-config": "ServiceB"} {
 		sp := &providerv1alpha1.ServiceProvider{}
 		if err := platform.Get(ctx, client.ObjectKey{Name: name}, sp); err != nil {
 			t.Fatal(err)
@@ -168,6 +168,26 @@ func TestAccountRuntimeUsesAccountAsOnlyCluster(t *testing.T) {
 		if len(sp.Status.Resources) != 1 || sp.Status.Resources[0].Kind != kind {
 			t.Fatalf("service provider %s has wrong resources: %#v", name, sp.Status.Resources)
 		}
+	}
+}
+
+func TestWorkspaceRuntimeWithoutProvidersCreatesNoProviderResources(t *testing.T) {
+	ctx := context.Background()
+	r, platform, _ := testRuntime(t)
+	r.providers = nil
+	if err := r.ensurePlatformRuntime(ctx, "root:tenants:plain", "openmcp-plain", "https://kcp.example/clusters/plain"); err != nil {
+		t.Fatal(err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := platform.List(ctx, deployments, client.InNamespace("openmcp-plain")); err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("got %d provider deployments, want 0", len(deployments.Items))
+	}
+	serviceAccount := &corev1.ServiceAccount{}
+	if err := platform.Get(ctx, client.ObjectKey{Namespace: "openmcp-plain", Name: providerServiceAccount}, serviceAccount); !apierrors.IsNotFound(err) {
+		t.Fatalf("provider ServiceAccount exists without providers: %v", err)
 	}
 }
 
@@ -189,15 +209,15 @@ func contains(values []string, wanted string) bool {
 	return false
 }
 
-func TestAccountRuntimeIssuesScopedCredential(t *testing.T) {
+func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 	ctx := context.Background()
-	r, platform, account := testRuntime(t)
-	accountName := multicluster.ClusterName("root:orgs:demo")
-	platformNamespace, err := platformNamespaceForAccount(accountName)
+	r, platform, workspace := testRuntime(t)
+	workspaceName := multicluster.ClusterName("root:tenants:demo")
+	platformNamespace, err := platformNamespaceForWorkspace(workspaceName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.ensurePlatformRuntime(ctx, accountName, platformNamespace, "https://kcp.example/clusters/root:orgs:demo"); err != nil {
+	if err := r.ensurePlatformRuntime(ctx, workspaceName, platformNamespace, "https://kcp.example/clusters/root:tenants:demo"); err != nil {
 		t.Fatal(err)
 	}
 	request := &clustersv1alpha1.ClusterRequest{
@@ -225,10 +245,10 @@ func TestAccountRuntimeIssuesScopedCredential(t *testing.T) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil
 		}
-		return true, &authv1.TokenRequest{Status: authv1.TokenRequestStatus{Token: "account-token", ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour))}}, nil
+		return true, &authv1.TokenRequest{Status: authv1.TokenRequestStatus{Token: "workspace-token", ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour))}}, nil
 	})
-	config := &rest.Config{Host: "https://kcp.example/clusters/root:orgs:demo", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("account-ca")}}
-	if err := r.reconcileAccessRequests(ctx, platformNamespace, account, clientset, config, testBindingOwner()); err != nil {
+	config := &rest.Config{Host: "https://kcp.example/clusters/root:tenants:demo", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("workspace-ca")}}
+	if err := r.reconcileAccessRequests(ctx, platformNamespace, workspace, clientset, config, testBindingOwner()); err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(access), access); err != nil {
@@ -245,87 +265,87 @@ func TestAccountRuntimeIssuesScopedCredential(t *testing.T) {
 		t.Fatalf("credential Secret is not owned by its AccessRequest: %#v", secret.OwnerReferences)
 	}
 	kubeconfig := string(secret.Data[clustersv1alpha1.SecretKeyKubeconfig])
-	if !containsAll(kubeconfig, "https://kcp.example/clusters/root:orgs:demo", "account-token") {
-		t.Fatalf("credential is not scoped to the account endpoint: %s", kubeconfig)
+	if !containsAll(kubeconfig, "https://kcp.example/clusters/root:tenants:demo", "workspace-token") {
+		t.Fatalf("credential is not scoped to the workspace endpoint: %s", kubeconfig)
 	}
 	grants := &rbacv1.ClusterRoleBindingList{}
-	if err := account.List(ctx, grants, client.MatchingLabels{accountAccessOwnerLabel: string(access.UID)}); err != nil {
+	if err := workspace.List(ctx, grants, client.MatchingLabels{workspaceAccessOwnerLabel: string(access.UID)}); err != nil {
 		t.Fatal(err)
 	}
 	if len(grants.Items) != 1 || len(grants.Items[0].OwnerReferences) != 1 || grants.Items[0].OwnerReferences[0].UID != testBindingOwner().UID {
-		t.Fatalf("account access is not owned by the APIBinding: %#v", grants.Items)
+		t.Fatalf("workspace access is not owned by the APIBinding: %#v", grants.Items)
 	}
 }
 
-func TestAccountRuntimeCancelsStaleCleanupAndRemovesDisengagedRuntime(t *testing.T) {
+func TestWorkspaceRuntimeCancelsStaleCleanupAndRemovesDisengagedRuntime(t *testing.T) {
 	ctx := context.Background()
-	r, platform, account := testRuntime(t)
+	r, platform, workspace := testRuntime(t)
 	r.cleanupDelay = 20 * time.Millisecond
-	accountName := multicluster.ClusterName("root:orgs:demo")
-	accountNamespace := accountControlPlaneNamespace(accountName)
-	platformNamespace, err := platformNamespaceForAccount(accountName)
+	workspaceName := multicluster.ClusterName("root:tenants:demo")
+	workspaceNamespace := workspaceControlPlaneNamespace(workspaceName)
+	platformNamespace, err := platformNamespaceForWorkspace(workspaceName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
-	if err := bootstrap.ensureDefault(ctx, account, accountNamespace, testBindingOwner()); err != nil {
+	if err := bootstrap.ensureDefault(ctx, workspace, workspaceNamespace, testBindingOwner()); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.ensurePlatformRuntime(ctx, accountName, platformNamespace, "https://kcp.example/clusters/root:orgs:demo"); err != nil {
+	if err := r.ensurePlatformRuntime(ctx, workspaceName, platformNamespace, "https://kcp.example/clusters/root:tenants:demo"); err != nil {
 		t.Fatal(err)
 	}
-	request := &clustersv1alpha1.ClusterRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: platformNamespace, UID: types.UID("request-cleanup"), Finalizers: []string{accountRequestFinalizer}}}
+	request := &clustersv1alpha1.ClusterRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: platformNamespace, UID: types.UID("request-cleanup"), Finalizers: []string{workspaceRequestFinalizer}}}
 	if err := platform.Create(ctx, request); err != nil {
 		t.Fatal(err)
 	}
 	cluster := &clustersv1alpha1.Cluster{}
-	if err := platform.Get(ctx, client.ObjectKey{Namespace: platformNamespace, Name: accountClusterName}, cluster); err != nil {
+	if err := platform.Get(ctx, client.ObjectKey{Namespace: platformNamespace, Name: workspaceClusterName}, cluster); err != nil {
 		t.Fatal(err)
 	}
 	controllerutil.AddFinalizer(cluster, request.FinalizerForCluster())
 	if err := platform.Update(ctx, cluster); err != nil {
 		t.Fatal(err)
 	}
-	access := &clustersv1alpha1.AccessRequest{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: platformNamespace, UID: types.UID("access-cleanup"), Finalizers: []string{accountAccessFinalizer}}}
+	access := &clustersv1alpha1.AccessRequest{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: platformNamespace, UID: types.UID("access-cleanup"), Finalizers: []string{workspaceAccessFinalizer}}}
 	if err := platform.Create(ctx, access); err != nil {
 		t.Fatal(err)
 	}
 
 	r.mu.Lock()
-	r.generations = map[multicluster.ClusterName]uint64{accountName: 1}
+	r.generations = map[multicluster.ClusterName]uint64{workspaceName: 1}
 	r.mu.Unlock()
-	r.scheduleCleanup(accountName, 1, account, r.log)
+	r.scheduleCleanup(workspaceName, 1, workspace, r.log)
 	r.mu.Lock()
-	r.generations[accountName] = 2
+	r.generations[workspaceName] = 2
 	r.mu.Unlock()
 	time.Sleep(4 * r.cleanupDelay)
-	if err := account.Get(ctx, client.ObjectKey{Name: accountNamespace}, &corev1.Namespace{}); err != nil {
+	if err := workspace.Get(ctx, client.ObjectKey{Name: workspaceNamespace}, &corev1.Namespace{}); err != nil {
 		t.Fatalf("re-engagement did not cancel cleanup: %v", err)
 	}
 	if err := platform.Get(ctx, client.ObjectKey{Name: platformNamespace}, &corev1.Namespace{}); err != nil {
 		t.Fatalf("re-engagement removed the platform runtime: %v", err)
 	}
 
-	r.scheduleCleanup(accountName, 2, account, r.log)
+	r.scheduleCleanup(workspaceName, 2, workspace, r.log)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		accountErr := account.Get(ctx, client.ObjectKey{Name: accountNamespace}, &corev1.Namespace{})
+		workspaceErr := workspace.Get(ctx, client.ObjectKey{Name: workspaceNamespace}, &corev1.Namespace{})
 		platformErr := platform.Get(ctx, client.ObjectKey{Name: platformNamespace}, &corev1.Namespace{})
-		if apierrors.IsNotFound(accountErr) && apierrors.IsNotFound(platformErr) {
+		if apierrors.IsNotFound(workspaceErr) && apierrors.IsNotFound(platformErr) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("disengaged account runtime was not removed")
+	t.Fatal("disengaged workspace runtime was not removed")
 }
 
-func TestAccountRuntimeRefusesForeignRBACAdoption(t *testing.T) {
+func TestWorkspaceRuntimeRefusesForeignRBACAdoption(t *testing.T) {
 	ctx := context.Background()
-	_, _, account := testRuntime(t)
-	if err := account.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "target"}}); err != nil {
+	_, _, workspace := testRuntime(t)
+	if err := workspace.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "target"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := account.Create(ctx, &rbacv1.Role{
+	if err := workspace.Create(ctx, &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "target", UID: types.UID("foreign-uid")},
 		Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}}},
 	}); err != nil {
@@ -337,47 +357,47 @@ func TestAccountRuntimeRefusesForeignRBACAdoption(t *testing.T) {
 			Name: "foreign", Namespace: "target", Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}}},
 		}}}},
 	}
-	err := ensureAccountAccess(ctx, account, access, testBindingOwner())
+	err := ensureWorkspaceAccess(ctx, workspace, access, testBindingOwner())
 	if err == nil || !strings.Contains(err.Error(), "refusing to adopt foreign") {
 		t.Fatalf("foreign RBAC object was adopted: %v", err)
 	}
 }
 
-func TestAccountRuntimeInstallsAndEnforcesDisconnectGuard(t *testing.T) {
+func TestWorkspaceRuntimeInstallsAndEnforcesDisconnectGuard(t *testing.T) {
 	ctx := context.Background()
-	r, _, account := testRuntime(t)
-	accountName := multicluster.ClusterName("account")
-	binding := &kcpapisv1alpha1.APIBinding{ObjectMeta: metav1.ObjectMeta{Name: "ocp", UID: types.UID("binding-1")}}
+	r, _, workspace := testRuntime(t)
+	workspaceName := multicluster.ClusterName("workspace")
+	binding := &kcpapisv1alpha1.APIBinding{ObjectMeta: metav1.ObjectMeta{Name: "services", UID: types.UID("binding-1")}}
 	logical := &kcpcorev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Name: kcpcorev1alpha1.LogicalClusterName}}
-	if err := account.Create(ctx, binding); err != nil {
+	if err := workspace.Create(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
-	if err := account.Create(ctx, logical); err != nil {
+	if err := workspace.Create(ctx, logical); err != nil {
 		t.Fatal(err)
 	}
-	r.disconnectGuard = &accountDisconnectGuard{bindingName: "ocp", url: "https://guard.example.test/disconnect", caBundle: []byte("ca")}
-	r.accounts = map[multicluster.ClusterName]client.Client{accountName: account}
-	if err := r.ensureDisconnectWebhook(ctx, accountName, account); err != nil {
+	r.disconnectGuard = &workspaceDisconnectGuard{bindingName: "services", url: "https://guard.example.test/disconnect", caBundle: []byte("ca")}
+	r.workspaces = map[multicluster.ClusterName]client.Client{workspaceName: workspace}
+	if err := r.ensureDisconnectWebhook(ctx, workspaceName, workspace); err != nil {
 		t.Fatal(err)
 	}
 	webhook := &admissionv1.ValidatingWebhookConfiguration{}
-	if err := account.Get(ctx, client.ObjectKey{Name: "ocp-disconnect-binding-1"}, webhook); err != nil {
+	if err := workspace.Get(ctx, client.ObjectKey{Name: "openmcp-disconnect-binding-1"}, webhook); err != nil {
 		t.Fatal(err)
 	}
 	if len(webhook.Webhooks) != 1 || webhook.Webhooks[0].ClientConfig.URL == nil || *webhook.Webhooks[0].ClientConfig.URL != r.disconnectGuard.url {
 		t.Fatalf("wrong disconnect webhook: %#v", webhook.Webhooks)
 	}
-	resolved, deleting, err := r.resolveDisconnectAccount(ctx, string(accountName), binding.Name, binding.UID)
+	resolved, deleting, err := r.resolveDisconnectWorkspace(ctx, string(workspaceName), binding.Name, binding.UID)
 	if err != nil || deleting || resolved == nil {
-		t.Fatalf("account resolution failed: client=%v deleting=%v err=%v", resolved, deleting, err)
+		t.Fatalf("workspace resolution failed: client=%v deleting=%v err=%v", resolved, deleting, err)
 	}
-	if _, _, err := r.resolveDisconnectAccount(ctx, string(accountName), binding.Name, types.UID("other")); err == nil {
+	if _, _, err := r.resolveDisconnectWorkspace(ctx, string(workspaceName), binding.Name, types.UID("other")); err == nil {
 		t.Fatal("wrong binding UID was accepted")
 	}
 }
 
-func platformNamespaceForAccount(name multicluster.ClusterName) (string, error) {
-	return libutils.StableMCPNamespace(defaultControlPlaneName, accountControlPlaneNamespace(name))
+func platformNamespaceForWorkspace(name multicluster.ClusterName) (string, error) {
+	return libutils.StableMCPNamespace(defaultControlPlaneName, workspaceControlPlaneNamespace(name))
 }
 
 func containsAll(value string, needles ...string) bool {

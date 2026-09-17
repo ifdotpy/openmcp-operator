@@ -31,19 +31,17 @@ import (
 )
 
 const (
-	accountClusterName        = "account"
-	accountClusterProfile     = "kcp-account"
-	accountProviderName       = "openmcp-account-runtime"
-	accountRuntimeLabel       = "openmcp.cloud/account-runtime"
-	accountRequestFinalizer   = "account.openmcp.cloud/request"
-	accountAccessFinalizer    = "account.openmcp.cloud/access"
+	workspaceClusterName      = "workspace"
+	workspaceClusterProfile   = "kcp-workspace"
+	workspaceProviderName     = "openmcp-workspace-runtime"
+	workspaceRuntimeLabel     = "openmcp.cloud/workspace-runtime"
+	workspaceRequestFinalizer = "workspace.openmcp.cloud/request"
+	workspaceAccessFinalizer  = "workspace.openmcp.cloud/access"
 	clusterRoleKind           = "ClusterRole"
 	controllerName            = "controller"
-	externalSecretsAPIGroup   = "external-secrets.services.open-control-plane.io"
-	fluxAPIGroup              = "flux.services.open-control-plane.io"
 	providerServiceAccount    = "service-provider"
 	providerRoleName          = "service-provider"
-	providerClusterRolePrefix = "ocp-account-"
+	providerClusterRolePrefix = "openmcp-workspace-"
 	roleKind                  = "Role"
 	serviceAccountKind        = "ServiceAccount"
 	verbCreate                = "create"
@@ -53,17 +51,9 @@ const (
 	verbPatch                 = "patch"
 	verbUpdate                = "update"
 	verbWatch                 = "watch"
-	serviceAPIVersion         = "v1alpha1"
 )
 
-type accountProvider struct {
-	name         string
-	image        string
-	providerName string
-	resource     metav1.GroupVersionKind
-}
-
-type accountRuntime struct {
+type workspaceRuntime struct {
 	log               logging.Logger
 	platform          *controllerclusters.Cluster
 	environment       string
@@ -71,32 +61,32 @@ type accountRuntime struct {
 	reconcileInterval time.Duration
 	cleanupDelay      time.Duration
 	tokenLifetime     time.Duration
-	providers         []accountProvider
-	disconnectGuard   *accountDisconnectGuard
+	providers         []workspaceProvider
+	disconnectGuard   *workspaceDisconnectGuard
 
 	mu          sync.Mutex
 	generations map[multicluster.ClusterName]uint64
-	accounts    map[multicluster.ClusterName]client.Client
+	workspaces  map[multicluster.ClusterName]client.Client
 }
 
-var _ multicluster.Aware = (*accountRuntime)(nil)
+var _ multicluster.Aware = (*workspaceRuntime)(nil)
 
-func (r *accountRuntime) Start(ctx context.Context) error {
+func (r *workspaceRuntime) Start(ctx context.Context) error {
 	<-ctx.Done()
 	return nil
 }
 
-func (r *accountRuntime) Engage(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster) error {
+func (r *workspaceRuntime) Engage(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster) error {
 	r.mu.Lock()
 	if r.generations == nil {
 		r.generations = map[multicluster.ClusterName]uint64{}
 	}
-	if r.accounts == nil {
-		r.accounts = map[multicluster.ClusterName]client.Client{}
+	if r.workspaces == nil {
+		r.workspaces = map[multicluster.ClusterName]client.Client{}
 	}
 	r.generations[name]++
 	generation := r.generations[name]
-	r.accounts[name] = cl.GetClient()
+	r.workspaces[name] = cl.GetClient()
 	r.mu.Unlock()
 
 	log := r.log.WithValues("cluster", string(name), "generation", generation)
@@ -104,15 +94,15 @@ func (r *accountRuntime) Engage(ctx context.Context, name multicluster.ClusterNa
 	return nil
 }
 
-func (r *accountRuntime) run(ctx context.Context, name multicluster.ClusterName, generation uint64, cl cluster.Cluster, log logging.Logger) {
-	accountClientset, err := kubernetes.NewForConfig(cl.GetConfig())
+func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterName, generation uint64, cl cluster.Cluster, log logging.Logger) {
+	workspaceClientset, err := kubernetes.NewForConfig(cl.GetConfig())
 	if err != nil {
-		log.Error(err, "unable to create account clientset")
+		log.Error(err, "unable to create workspace clientset")
 		return
 	}
 	reconcile := func() {
-		if err := r.reconcile(ctx, name, cl, accountClientset); err != nil && ctx.Err() == nil {
-			log.Error(err, "account runtime reconciliation failed")
+		if err := r.reconcile(ctx, name, cl, workspaceClientset); err != nil && ctx.Err() == nil {
+			log.Error(err, "workspace runtime reconciliation failed")
 		}
 	}
 	reconcile()
@@ -129,14 +119,14 @@ func (r *accountRuntime) run(ctx context.Context, name multicluster.ClusterName,
 	}
 }
 
-func (r *accountRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, accountClientset kubernetes.Interface) error {
-	owner, err := r.accountOwnerReference(ctx, cl.GetClient())
+func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceClientset kubernetes.Interface) error {
+	owner, err := r.workspaceOwnerReference(ctx, cl.GetClient())
 	if err != nil {
 		return err
 	}
-	accountNamespace := accountControlPlaneNamespace(name)
+	workspaceNamespace := workspaceControlPlaneNamespace(name)
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
-	if err := bootstrap.ensureDefault(ctx, cl.GetClient(), accountNamespace, owner); err != nil {
+	if err := bootstrap.ensureDefault(ctx, cl.GetClient(), workspaceNamespace, owner); err != nil {
 		return err
 	}
 	if r.disconnectGuard != nil {
@@ -144,7 +134,7 @@ func (r *accountRuntime) reconcile(ctx context.Context, name multicluster.Cluste
 			return err
 		}
 	}
-	platformNamespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, accountNamespace)
+	platformNamespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceNamespace)
 	if err != nil {
 		return err
 	}
@@ -154,16 +144,16 @@ func (r *accountRuntime) reconcile(ctx context.Context, name multicluster.Cluste
 	if err := r.reconcileClusterRequests(ctx, platformNamespace); err != nil {
 		return err
 	}
-	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), accountClientset, cl.GetConfig(), owner)
+	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceClientset, cl.GetConfig(), owner)
 }
 
-func (r *accountRuntime) accountOwnerReference(ctx context.Context, c client.Client) (metav1.OwnerReference, error) {
+func (r *workspaceRuntime) workspaceOwnerReference(ctx context.Context, c client.Client) (metav1.OwnerReference, error) {
 	binding := &kcpapisv1alpha1.APIBinding{}
 	if err := c.Get(ctx, client.ObjectKey{Name: r.bindingName}, binding); err != nil {
-		return metav1.OwnerReference{}, fmt.Errorf("get account APIBinding: %w", err)
+		return metav1.OwnerReference{}, fmt.Errorf("get workspace APIBinding: %w", err)
 	}
 	if binding.UID == "" {
-		return metav1.OwnerReference{}, fmt.Errorf("account APIBinding has no UID")
+		return metav1.OwnerReference{}, fmt.Errorf("workspace APIBinding has no UID")
 	}
 	return metav1.OwnerReference{
 		APIVersion: kcpapisv1alpha1.SchemeGroupVersion.String(),
@@ -173,75 +163,74 @@ func (r *accountRuntime) accountOwnerReference(ctx context.Context, c client.Cli
 	}, nil
 }
 
-func (r *accountRuntime) ensurePlatformRuntime(ctx context.Context, name multicluster.ClusterName, namespace, endpoint string) error {
+func (r *workspaceRuntime) ensurePlatformRuntime(ctx context.Context, name multicluster.ClusterName, namespace, endpoint string) error {
 	c := r.platform.Client()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, ns, func() error {
 		if ns.Labels == nil {
 			ns.Labels = map[string]string{}
 		}
-		ns.Labels[accountRuntimeLabel] = accountControlPlaneNamespace(name)
+		ns.Labels[workspaceRuntimeLabel] = workspaceControlPlaneNamespace(name)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("ensure platform namespace: %w", err)
 	}
 
-	accountCluster := &clustersv1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: accountClusterName, Namespace: namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, accountCluster, func() error {
-		accountCluster.Labels = map[string]string{
-			accountRuntimeLabel:            accountControlPlaneNamespace(name),
-			clustersv1alpha1.ProviderLabel: accountProviderName,
-			clustersv1alpha1.ProfileLabel:  accountClusterProfile,
+	workspaceCluster := &clustersv1alpha1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: workspaceClusterName, Namespace: namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, c, workspaceCluster, func() error {
+		workspaceCluster.Labels = map[string]string{
+			workspaceRuntimeLabel:          workspaceControlPlaneNamespace(name),
+			clustersv1alpha1.ProviderLabel: workspaceProviderName,
+			clustersv1alpha1.ProfileLabel:  workspaceClusterProfile,
 		}
-		accountCluster.Spec = clustersv1alpha1.ClusterSpec{
-			Profile:  accountClusterProfile,
+		workspaceCluster.Spec = clustersv1alpha1.ClusterSpec{
+			Profile:  workspaceClusterProfile,
 			Purposes: []string{clustersv1alpha1.PURPOSE_ONBOARDING, clustersv1alpha1.PURPOSE_MCP},
 			Tenancy:  clustersv1alpha1.TENANCY_SHARED,
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("ensure account Cluster: %w", err)
+		return fmt.Errorf("ensure workspace Cluster: %w", err)
 	}
-	oldCluster := accountCluster.DeepCopy()
-	accountCluster.Status.Phase = commonapi.StatusPhaseReady
-	accountCluster.Status.ObservedGeneration = accountCluster.Generation
-	accountCluster.Status.Endpoints.Set(clustersv1alpha1.APISERVER_ENDPOINT_EXTERNAL, endpoint)
-	if err := c.Status().Patch(ctx, accountCluster, client.MergeFrom(oldCluster)); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("mark account Cluster ready: %w", err)
+	oldCluster := workspaceCluster.DeepCopy()
+	workspaceCluster.Status.Phase = commonapi.StatusPhaseReady
+	workspaceCluster.Status.ObservedGeneration = workspaceCluster.Generation
+	workspaceCluster.Status.Endpoints.Set(clustersv1alpha1.APISERVER_ENDPOINT_EXTERNAL, endpoint)
+	if err := c.Status().Patch(ctx, workspaceCluster, client.MergeFrom(oldCluster)); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("mark workspace Cluster ready: %w", err)
 	}
 
-	if err := r.ensureProviderRBAC(ctx, namespace); err != nil {
-		return err
-	}
-	for _, provider := range r.providers {
-		if provider.image == "" {
-			continue
-		}
-		if err := r.ensureServiceProvider(ctx, provider); err != nil {
+	if len(r.providers) > 0 {
+		if err := r.ensureProviderRBAC(ctx, namespace); err != nil {
 			return err
 		}
-		if err := r.ensureProviderDeployment(ctx, namespace, provider); err != nil {
-			return err
+		for _, provider := range r.providers {
+			if err := r.ensureServiceProvider(ctx, provider); err != nil {
+				return err
+			}
+			if err := r.ensureProviderDeployment(ctx, namespace, provider); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func (r *accountRuntime) ensureServiceProvider(ctx context.Context, provider accountProvider) error {
+func (r *workspaceRuntime) ensureServiceProvider(ctx context.Context, provider workspaceProvider) error {
 	c := r.platform.Client()
-	sp := &providerv1alpha1.ServiceProvider{ObjectMeta: metav1.ObjectMeta{Name: provider.providerName}}
+	sp := &providerv1alpha1.ServiceProvider{ObjectMeta: metav1.ObjectMeta{Name: provider.ProviderName}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, sp, func() error { return nil }); err != nil {
-		return fmt.Errorf("ensure %s ServiceProvider: %w", provider.name, err)
+		return fmt.Errorf("ensure %s ServiceProvider: %w", provider.Name, err)
 	}
 	old := sp.DeepCopy()
-	sp.Status.Resources = []metav1.GroupVersionKind{provider.resource}
+	sp.Status.Resources = []metav1.GroupVersionKind{provider.Resource}
 	if err := c.Status().Patch(ctx, sp, client.MergeFrom(old)); err != nil {
-		return fmt.Errorf("register %s service resource: %w", provider.name, err)
+		return fmt.Errorf("register %s service resource: %w", provider.Name, err)
 	}
 	return nil
 }
 
-func (r *accountRuntime) ensureProviderRBAC(ctx context.Context, namespace string) error {
+func (r *workspaceRuntime) ensureProviderRBAC(ctx context.Context, namespace string) error {
 	c := r.platform.Client()
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: providerServiceAccount, Namespace: namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, sa, func() error { return nil }); err != nil {
@@ -268,18 +257,17 @@ func (r *accountRuntime) ensureProviderRBAC(ctx context.Context, namespace strin
 	}
 
 	clusterRoleName := providerClusterRolePrefix + namespace[len(namespace)-16:]
-	cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: clusterRoleName, Labels: map[string]string{accountRuntimeLabel: namespace}}}
+	cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: clusterRoleName, Labels: map[string]string{workspaceRuntimeLabel: namespace}}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, cr, func() error {
-		cr.Rules = []rbacv1.PolicyRule{
-			{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{verbGet}},
-			{APIGroups: []string{fluxAPIGroup}, Resources: []string{"providerconfigs"}, Verbs: []string{verbGet, verbList, verbWatch}},
-			{APIGroups: []string{externalSecretsAPIGroup}, Resources: []string{"providerconfigs"}, Verbs: []string{verbGet, verbList, verbWatch}},
+		cr.Rules = []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{verbGet}}}
+		for _, provider := range r.providers {
+			cr.Rules = append(cr.Rules, provider.ClusterRoleRules...)
 		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("ensure provider ClusterRole: %w", err)
 	}
-	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: clusterRoleName, Labels: map[string]string{accountRuntimeLabel: namespace}}}
+	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: clusterRoleName, Labels: map[string]string{workspaceRuntimeLabel: namespace}}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, crb, func() error {
 		crb.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: clusterRoleKind, Name: clusterRoleName}
 		crb.Subjects = []rbacv1.Subject{{Kind: serviceAccountKind, Name: providerServiceAccount, Namespace: namespace}}
@@ -290,14 +278,14 @@ func (r *accountRuntime) ensureProviderRBAC(ctx context.Context, namespace strin
 	return nil
 }
 
-func (r *accountRuntime) ensureProviderDeployment(ctx context.Context, namespace string, provider accountProvider) error {
+func (r *workspaceRuntime) ensureProviderDeployment(ctx context.Context, namespace string, provider workspaceProvider) error {
 	c := r.platform.Client()
-	labels := map[string]string{"app.kubernetes.io/name": provider.name, accountRuntimeLabel: namespace}
-	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: provider.name, Namespace: namespace}}
+	labels := map[string]string{"app.kubernetes.io/name": provider.Name, workspaceRuntimeLabel: namespace}
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: provider.Name, Namespace: namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, c, dep, func() error {
 		one := int32(1)
 		dep.Spec.Replicas = &one
-		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": provider.name}}
+		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": provider.Name}}
 		dep.Spec.Template.Labels = labels
 		dep.Spec.Template.Spec.ServiceAccountName = providerServiceAccount
 		dep.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
@@ -306,8 +294,8 @@ func (r *accountRuntime) ensureProviderDeployment(ctx context.Context, namespace
 		}
 		dep.Spec.Template.Spec.Containers = []corev1.Container{{
 			Name:            controllerName,
-			Image:           provider.image,
-			Args:            []string{"run", "--environment", r.environment, "--provider-name", provider.providerName, "--metrics-bind-address", "0", "--health-probe-bind-address", ":8081"},
+			Image:           provider.Image,
+			Args:            []string{"run", "--environment", r.environment, "--provider-name", provider.ProviderName, "--metrics-bind-address", "0", "--health-probe-bind-address", ":8081"},
 			Env:             []corev1.EnvVar{{Name: apiconst.EnvVariablePodNamespace, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}}},
 			Ports:           []corev1.ContainerPort{{Name: "health", ContainerPort: 8081}},
 			ReadinessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString("health")}}},
@@ -317,12 +305,12 @@ func (r *accountRuntime) ensureProviderDeployment(ctx context.Context, namespace
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("ensure %s Deployment: %w", provider.name, err)
+		return fmt.Errorf("ensure %s Deployment: %w", provider.Name, err)
 	}
 	return nil
 }
 
-func (r *accountRuntime) reconcileClusterRequests(ctx context.Context, namespace string) error {
+func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespace string) error {
 	c := r.platform.Client()
 	list := &clustersv1alpha1.ClusterRequestList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -333,37 +321,37 @@ func (r *accountRuntime) reconcileClusterRequests(ctx context.Context, namespace
 		if cr.Spec.Purpose != clustersv1alpha1.PURPOSE_ONBOARDING && cr.Spec.Purpose != clustersv1alpha1.PURPOSE_MCP {
 			continue
 		}
-		accountCluster := &clustersv1alpha1.Cluster{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: accountClusterName}, accountCluster); err != nil {
+		workspaceCluster := &clustersv1alpha1.Cluster{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: workspaceClusterName}, workspaceCluster); err != nil {
 			return err
 		}
 		if !cr.DeletionTimestamp.IsZero() {
-			if controllerutil.RemoveFinalizer(accountCluster, cr.FinalizerForCluster()) {
-				if err := c.Update(ctx, accountCluster); err != nil && !apierrors.IsNotFound(err) {
+			if controllerutil.RemoveFinalizer(workspaceCluster, cr.FinalizerForCluster()) {
+				if err := c.Update(ctx, workspaceCluster); err != nil && !apierrors.IsNotFound(err) {
 					return err
 				}
 			}
-			if controllerutil.RemoveFinalizer(cr, accountRequestFinalizer) {
+			if controllerutil.RemoveFinalizer(cr, workspaceRequestFinalizer) {
 				if err := c.Update(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
 					return err
 				}
 			}
 			continue
 		}
-		if controllerutil.AddFinalizer(cr, accountRequestFinalizer) {
+		if controllerutil.AddFinalizer(cr, workspaceRequestFinalizer) {
 			if err := c.Update(ctx, cr); err != nil {
 				return err
 			}
 		}
-		if controllerutil.AddFinalizer(accountCluster, cr.FinalizerForCluster()) {
-			if err := c.Update(ctx, accountCluster); err != nil {
+		if controllerutil.AddFinalizer(workspaceCluster, cr.FinalizerForCluster()) {
+			if err := c.Update(ctx, workspaceCluster); err != nil {
 				return err
 			}
 		}
 		old := cr.DeepCopy()
 		cr.Status.Phase = clustersv1alpha1.REQUEST_GRANTED
 		cr.Status.ObservedGeneration = cr.Generation
-		cr.Status.Cluster = &commonapi.ObjectReference{Name: accountClusterName, Namespace: namespace}
+		cr.Status.Cluster = &commonapi.ObjectReference{Name: workspaceClusterName, Namespace: namespace}
 		if err := c.Status().Patch(ctx, cr, client.MergeFrom(old)); err != nil {
 			return err
 		}
@@ -371,7 +359,7 @@ func (r *accountRuntime) reconcileClusterRequests(ctx context.Context, namespace
 	return nil
 }
 
-func (r *accountRuntime) scheduleCleanup(name multicluster.ClusterName, generation uint64, accountClient client.Client, log logging.Logger) {
+func (r *workspaceRuntime) scheduleCleanup(name multicluster.ClusterName, generation uint64, workspaceClient client.Client, log logging.Logger) {
 	time.AfterFunc(r.cleanupDelay, func() {
 		r.mu.Lock()
 		current := r.generations[name]
@@ -380,19 +368,19 @@ func (r *accountRuntime) scheduleCleanup(name multicluster.ClusterName, generati
 			return
 		}
 		delete(r.generations, name)
-		delete(r.accounts, name)
+		delete(r.workspaces, name)
 		r.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		r.cleanupAccountAccess(name, accountClient, log)
+		r.cleanupWorkspaceAccess(name, workspaceClient, log)
 		if err := r.cleanupPlatform(ctx, name); err != nil {
-			log.Error(err, "account runtime cleanup failed")
+			log.Error(err, "workspace runtime cleanup failed")
 		}
 	})
 }
 
-func (r *accountRuntime) cleanupPlatform(ctx context.Context, name multicluster.ClusterName) error {
-	namespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, accountControlPlaneNamespace(name))
+func (r *workspaceRuntime) cleanupPlatform(ctx context.Context, name multicluster.ClusterName) error {
+	namespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceControlPlaneNamespace(name))
 	if err != nil {
 		return err
 	}
@@ -412,14 +400,14 @@ func (r *accountRuntime) cleanupPlatform(ctx context.Context, name multicluster.
 	return nil
 }
 
-func (r *accountRuntime) releasePlatformRequests(ctx context.Context, c client.Client, namespace string) error {
+func (r *workspaceRuntime) releasePlatformRequests(ctx context.Context, c client.Client, namespace string) error {
 	accessRequests := &clustersv1alpha1.AccessRequestList{}
 	if err := c.List(ctx, accessRequests, client.InNamespace(namespace)); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("list runtime AccessRequests: %w", err)
 	}
 	for i := range accessRequests.Items {
 		request := &accessRequests.Items[i]
-		if controllerutil.RemoveFinalizer(request, accountAccessFinalizer) {
+		if controllerutil.RemoveFinalizer(request, workspaceAccessFinalizer) {
 			if err := c.Update(ctx, request); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("release AccessRequest %s: %w", request.Name, err)
 			}
@@ -430,7 +418,7 @@ func (r *accountRuntime) releasePlatformRequests(ctx context.Context, c client.C
 	}
 
 	cluster := &clustersv1alpha1.Cluster{}
-	clusterErr := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: accountClusterName}, cluster)
+	clusterErr := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: workspaceClusterName}, cluster)
 	if clusterErr != nil && !apierrors.IsNotFound(clusterErr) {
 		return fmt.Errorf("get runtime Cluster: %w", clusterErr)
 	}
@@ -445,7 +433,7 @@ func (r *accountRuntime) releasePlatformRequests(ctx context.Context, c client.C
 				return fmt.Errorf("release runtime Cluster: %w", err)
 			}
 		}
-		if controllerutil.RemoveFinalizer(request, accountRequestFinalizer) {
+		if controllerutil.RemoveFinalizer(request, workspaceRequestFinalizer) {
 			if err := c.Update(ctx, request); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("release ClusterRequest %s: %w", request.Name, err)
 			}

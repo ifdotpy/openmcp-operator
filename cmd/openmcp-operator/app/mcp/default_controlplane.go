@@ -23,16 +23,16 @@ const (
 	defaultControlPlaneName = "default"
 	// bootstrapMarkerSecret records that the default ControlPlane was created
 	// once for a workspace, so a deliberately deleted default is not recreated.
-	bootstrapMarkerSecret = "opencontrolplane-bootstrap"
+	bootstrapMarkerSecret = "openmcp-workspace-bootstrap"
 )
 
-func accountControlPlaneNamespace(name multicluster.ClusterName) string {
+func workspaceControlPlaneNamespace(name multicluster.ClusterName) string {
 	sum := sha256.Sum256([]byte(name))
-	return fmt.Sprintf("opencontrolplane-%x", sum[:8])
+	return fmt.Sprintf("openmcp-%x", sum[:8])
 }
 
 // defaultControlPlaneBootstrapper creates one ControlPlane named "default" in
-// an account workspace. The marker Secret preserves a deliberate deletion.
+// a KCP workspace. The marker Secret preserves a deliberate deletion.
 type defaultControlPlaneBootstrapper struct {
 	log logging.Logger
 }
@@ -61,7 +61,7 @@ func (b *defaultControlPlaneBootstrapper) ensureDefault(ctx context.Context, c c
 			Name:      defaultControlPlaneName,
 			Namespace: namespace,
 			Annotations: map[string]string{
-				"open-control-plane.io/created-by": "enable",
+				"openmcp.cloud/created-by": "kcp-api-binding",
 			},
 		},
 		Spec: corev2alpha1.ControlPlaneSpec{

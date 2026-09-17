@@ -1,7 +1,7 @@
 // Copyright 2026 OpenControlPlane contributors.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package disconnectguard checks service orders before an OCP APIBinding deletion.
+// Package disconnectguard checks service objects before an APIBinding deletion.
 package disconnectguard
 
 import (
@@ -19,7 +19,7 @@ import (
 )
 
 // Inspect must verify the binding UID and inspect live orders in all namespaces.
-// It may allow deletion when the enclosing PM workspace is being deleted.
+// It may allow deletion when the enclosing workspace is being deleted.
 // Any inspection error prevents deletion.
 type Inspect func(context.Context, string, string, types.UID) error
 
@@ -51,7 +51,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h Handler) check(ctx context.Context, req *admission.AdmissionRequest) error {
 	if req.Operation != admission.Delete || req.Resource.Group != "apis.kcp.io" || req.Resource.Resource != "apibindings" || req.SubResource != "" {
-		return fmt.Errorf("unexpected operation for OCP disconnect guard")
+		return fmt.Errorf("unexpected operation for APIBinding disconnect guard")
 	}
 	var binding unstructured.Unstructured
 	if err := json.Unmarshal(req.OldObject.Raw, &binding); err != nil {

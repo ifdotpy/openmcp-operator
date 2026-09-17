@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -42,7 +41,7 @@ import (
 //
 // The reconciler code is unchanged: per request, a shallow copy of the
 // reconciler is bound to the tenant workspace (its client becomes the
-// OnboardingCluster of that copy). The account runtime gives every workspace a
+// OnboardingCluster of that copy). The workspace runtime gives every workspace a
 // unique internal ControlPlane namespace. Standard upstream providers derive
 // the same unique platform namespace without any kcp-specific code.
 func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logger) error {
@@ -131,22 +130,19 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		return fmt.Errorf("unable to build multicluster controller: %w", err)
 	}
 
-	// One runtime is created dynamically for every account that binds the APIExport.
-	// It registers the account itself as the onboarding and MCP cluster. Standard
-	// upstream service providers then use their normal ClusterRequest/AccessRequest
-	// handshake and receive credentials that are valid only in this account.
-	runtime := &accountRuntime{
+	// One runtime is created dynamically for every workspace that binds the APIExport.
+	// It registers the workspace itself as the onboarding and MCP cluster. Configured
+	// service providers use their normal ClusterRequest/AccessRequest handshake and
+	// receive credentials that are valid only in this workspace.
+	runtime := &workspaceRuntime{
 		log:               setupLog,
 		platform:          o.PlatformCluster,
 		environment:       o.Environment,
 		bindingName:       o.KCPBindingName,
-		reconcileInterval: o.KCPAccountReconcileInterval,
-		cleanupDelay:      o.KCPAccountCleanupDelay,
-		tokenLifetime:     o.KCPAccountTokenLifetime,
-		providers: []accountProvider{
-			{name: "flux", image: o.KCPFluxProviderImage, providerName: o.KCPFluxProviderName, resource: metav1.GroupVersionKind{Group: fluxAPIGroup, Version: serviceAPIVersion, Kind: "Flux"}},
-			{name: "external-secrets", image: o.KCPExternalSecretsProviderImage, providerName: o.KCPExternalSecretsProviderName, resource: metav1.GroupVersionKind{Group: externalSecretsAPIGroup, Version: serviceAPIVersion, Kind: "ExternalSecretsOperator"}},
-		},
+		reconcileInterval: o.KCPWorkspaceReconcileInterval,
+		cleanupDelay:      o.KCPWorkspaceCleanupDelay,
+		tokenLifetime:     o.KCPWorkspaceTokenLifetime,
+		providers:         o.KCPWorkspaceProviders,
 	}
 	if o.KCPDisconnectGuardAddress != "" {
 		var ca []byte
@@ -156,7 +152,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 				return fmt.Errorf("read disconnect guard CA: %w", err)
 			}
 		}
-		runtime.disconnectGuard = &accountDisconnectGuard{bindingName: o.KCPBindingName, url: o.KCPDisconnectGuardURL, caBundle: ca}
+		runtime.disconnectGuard = &workspaceDisconnectGuard{bindingName: o.KCPBindingName, url: o.KCPDisconnectGuardURL, caBundle: ca}
 		mux := http.NewServeMux()
 		mux.Handle("/disconnect", disconnectguard.Handler{Inspect: runtime.disconnectInspector().Check})
 		if err := mcMgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
@@ -166,7 +162,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		}
 	}
 	if err := mcMgr.Add(runtime); err != nil {
-		return fmt.Errorf("unable to add account runtime: %w", err)
+		return fmt.Errorf("unable to add workspace runtime: %w", err)
 	}
 
 	if err := mcMgr.GetLocalManager().AddHealthzCheck("healthz", healthz.Ping); err != nil {
