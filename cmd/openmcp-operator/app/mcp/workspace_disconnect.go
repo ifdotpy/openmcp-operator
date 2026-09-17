@@ -20,20 +20,15 @@ import (
 )
 
 type workspaceDisconnectGuard struct {
-	bindingName string
-	url         string
-	caBundle    []byte
+	url      string
+	caBundle []byte
 }
 
-func (r *workspaceRuntime) ensureDisconnectWebhook(ctx context.Context, name multicluster.ClusterName, c client.Client) error {
+func (r *workspaceRuntime) ensureDisconnectWebhook(ctx context.Context, name multicluster.ClusterName, c client.Client, binding *kcpapisv1alpha1.APIBinding) error {
 	guard := r.disconnectGuard
 	parsed, err := url.Parse(guard.url)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("disconnect guard requires an HTTPS URL without credentials, query, or fragment")
-	}
-	binding := &kcpapisv1alpha1.APIBinding{}
-	if err := c.Get(ctx, client.ObjectKey{Name: guard.bindingName}, binding); err != nil {
-		return fmt.Errorf("get protected APIBinding: %w", err)
 	}
 	if binding.UID == "" {
 		return fmt.Errorf("protected APIBinding has no UID")
@@ -79,7 +74,7 @@ func (r *workspaceRuntime) resolveDisconnectWorkspace(ctx context.Context, clust
 	if err := c.Get(ctx, client.ObjectKey{Name: bindingName}, binding); err != nil {
 		return nil, false, err
 	}
-	if bindingName != r.disconnectGuard.bindingName || binding.UID != uid {
+	if binding.UID != uid || !r.matchesWorkspaceExport(binding) {
 		return nil, false, fmt.Errorf("binding identity does not match")
 	}
 	logical := &kcpcorev1alpha1.LogicalCluster{}

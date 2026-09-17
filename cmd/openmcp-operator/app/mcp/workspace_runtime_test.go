@@ -66,6 +66,7 @@ func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client)
 		platform:      controllerclusters.NewTestClusterFromClient("platform", platform),
 		environment:   "test",
 		bindingName:   "services",
+		bindingExport: kcpapisv1alpha1.ExportBindingReference{Path: "root:providers", Name: "services.example.io"},
 		tokenLifetime: time.Hour,
 		providers: []workspaceProvider{
 			{Name: "example-a", Image: "example.test/a:v1", ProviderName: "example-a-config", Resource: metav1.GroupVersionKind{Group: "a.services.example.io", Version: "v1alpha1", Kind: "ServiceA"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"a.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
@@ -73,6 +74,28 @@ func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client)
 		},
 	}
 	return r, platform, workspace
+}
+
+func TestWorkspaceRuntimeDiscoversBindingByExport(t *testing.T) {
+	ctx := context.Background()
+	r, _, workspace := testRuntime(t)
+	binding := &kcpapisv1alpha1.APIBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-binding-name", UID: types.UID("binding-1")},
+		Spec: kcpapisv1alpha1.APIBindingSpec{Reference: kcpapisv1alpha1.BindingReference{Export: &kcpapisv1alpha1.ExportBindingReference{
+			Path: r.bindingExport.Path,
+			Name: r.bindingExport.Name,
+		}}},
+	}
+	if err := workspace.Create(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.workspaceBinding(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != binding.Name || got.UID != binding.UID {
+		t.Fatalf("discovered wrong APIBinding: %#v", got)
+	}
 }
 
 func testBindingOwner() metav1.OwnerReference {
@@ -367,7 +390,13 @@ func TestWorkspaceRuntimeInstallsAndEnforcesDisconnectGuard(t *testing.T) {
 	ctx := context.Background()
 	r, _, workspace := testRuntime(t)
 	workspaceName := multicluster.ClusterName("workspace")
-	binding := &kcpapisv1alpha1.APIBinding{ObjectMeta: metav1.ObjectMeta{Name: "services", UID: types.UID("binding-1")}}
+	binding := &kcpapisv1alpha1.APIBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "generated-binding-name", UID: types.UID("binding-1")},
+		Spec: kcpapisv1alpha1.APIBindingSpec{Reference: kcpapisv1alpha1.BindingReference{Export: &kcpapisv1alpha1.ExportBindingReference{
+			Path: r.bindingExport.Path,
+			Name: r.bindingExport.Name,
+		}}},
+	}
 	logical := &kcpcorev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Name: kcpcorev1alpha1.LogicalClusterName}}
 	if err := workspace.Create(ctx, binding); err != nil {
 		t.Fatal(err)
@@ -375,9 +404,9 @@ func TestWorkspaceRuntimeInstallsAndEnforcesDisconnectGuard(t *testing.T) {
 	if err := workspace.Create(ctx, logical); err != nil {
 		t.Fatal(err)
 	}
-	r.disconnectGuard = &workspaceDisconnectGuard{bindingName: "services", url: "https://guard.example.test/disconnect", caBundle: []byte("ca")}
+	r.disconnectGuard = &workspaceDisconnectGuard{url: "https://guard.example.test/disconnect", caBundle: []byte("ca")}
 	r.workspaces = map[multicluster.ClusterName]client.Client{workspaceName: workspace}
-	if err := r.ensureDisconnectWebhook(ctx, workspaceName, workspace); err != nil {
+	if err := r.ensureDisconnectWebhook(ctx, workspaceName, workspace, binding); err != nil {
 		t.Fatal(err)
 	}
 	webhook := &admissionv1.ValidatingWebhookConfiguration{}

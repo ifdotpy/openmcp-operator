@@ -58,6 +58,7 @@ type workspaceRuntime struct {
 	platform          *controllerclusters.Cluster
 	environment       string
 	bindingName       string
+	bindingExport     kcpapisv1alpha1.ExportBindingReference
 	reconcileInterval time.Duration
 	cleanupDelay      time.Duration
 	tokenLifetime     time.Duration
@@ -120,17 +121,18 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 }
 
 func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceClientset kubernetes.Interface) error {
-	owner, err := r.workspaceOwnerReference(ctx, cl.GetClient())
+	binding, err := r.workspaceBinding(ctx, cl.GetClient())
 	if err != nil {
 		return err
 	}
+	owner := workspaceBindingOwnerReference(binding)
 	workspaceNamespace := workspaceControlPlaneNamespace(name)
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
 	if err := bootstrap.ensureDefault(ctx, cl.GetClient(), workspaceNamespace, owner); err != nil {
 		return err
 	}
 	if r.disconnectGuard != nil {
-		if err := r.ensureDisconnectWebhook(ctx, name, cl.GetClient()); err != nil {
+		if err := r.ensureDisconnectWebhook(ctx, name, cl.GetClient(), binding); err != nil {
 			return err
 		}
 	}
@@ -147,20 +149,53 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceClientset, cl.GetConfig(), owner)
 }
 
-func (r *workspaceRuntime) workspaceOwnerReference(ctx context.Context, c client.Client) (metav1.OwnerReference, error) {
-	binding := &kcpapisv1alpha1.APIBinding{}
-	if err := c.Get(ctx, client.ObjectKey{Name: r.bindingName}, binding); err != nil {
-		return metav1.OwnerReference{}, fmt.Errorf("get workspace APIBinding: %w", err)
+func (r *workspaceRuntime) workspaceBinding(ctx context.Context, c client.Client) (*kcpapisv1alpha1.APIBinding, error) {
+	if r.bindingName != "" {
+		binding := &kcpapisv1alpha1.APIBinding{}
+		err := c.Get(ctx, client.ObjectKey{Name: r.bindingName}, binding)
+		if err == nil {
+			if !r.matchesWorkspaceExport(binding) {
+				return nil, fmt.Errorf("preferred APIBinding %q does not reference APIExport %q", binding.Name, r.bindingExport.Name)
+			}
+			return binding, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("get preferred workspace APIBinding: %w", err)
+		}
 	}
-	if binding.UID == "" {
-		return metav1.OwnerReference{}, fmt.Errorf("workspace APIBinding has no UID")
+	bindings := &kcpapisv1alpha1.APIBindingList{}
+	if err := c.List(ctx, bindings); err != nil {
+		return nil, fmt.Errorf("list workspace APIBindings: %w", err)
 	}
+	var match *kcpapisv1alpha1.APIBinding
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		if !r.matchesWorkspaceExport(binding) {
+			continue
+		}
+		if match != nil {
+			return nil, fmt.Errorf("multiple APIBindings reference APIExport %q", r.bindingExport.Name)
+		}
+		match = binding
+	}
+	if match == nil {
+		return nil, fmt.Errorf("no APIBinding references APIExport %q", r.bindingExport.Name)
+	}
+	return match, nil
+}
+
+func (r *workspaceRuntime) matchesWorkspaceExport(binding *kcpapisv1alpha1.APIBinding) bool {
+	export := binding.Spec.Reference.Export
+	return export != nil && export.Name == r.bindingExport.Name && export.Path == r.bindingExport.Path
+}
+
+func workspaceBindingOwnerReference(binding *kcpapisv1alpha1.APIBinding) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: kcpapisv1alpha1.SchemeGroupVersion.String(),
 		Kind:       "APIBinding",
 		Name:       binding.Name,
 		UID:        binding.UID,
-	}, nil
+	}
 }
 
 func (r *workspaceRuntime) ensurePlatformRuntime(ctx context.Context, name multicluster.ClusterName, namespace, endpoint string) error {

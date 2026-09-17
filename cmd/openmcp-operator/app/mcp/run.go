@@ -72,7 +72,7 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardCert, "kcp-disconnect-guard-cert", "", "Multicluster (kcp) mode: guard TLS certificate file.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardKey, "kcp-disconnect-guard-key", "", "Multicluster (kcp) mode: guard TLS private key file.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardCA, "kcp-disconnect-guard-ca", "", "Multicluster (kcp) mode: guard CA bundle file.")
-	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "", "Multicluster (kcp) mode: APIBinding that owns each workspace runtime.")
+	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "", "Multicluster (kcp) mode: preferred APIBinding name. The operator otherwise discovers the binding from the endpoint slice export.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	cmd.Flags().StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -162,9 +162,6 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 	if o.KCPEndpointSlice != "" {
 		if o.KCPKubeconfig == "" {
 			return fmt.Errorf("kcp-kubeconfig must not be empty in multicluster mode")
-		}
-		if o.KCPBindingName == "" {
-			return fmt.Errorf("kcp-binding-name must not be empty in multicluster mode")
 		}
 		if o.KCPWorkspaceReconcileInterval <= 0 {
 			return fmt.Errorf("kcp-workspace-reconcile-interval must be positive")
