@@ -183,12 +183,18 @@ func TestWorkspaceRuntimeUsesWorkspaceAsOnlyCluster(t *testing.T) {
 	if len(clusterRoles.Items) != 1 || !allows(clusterRoles.Items[0].Rules, "", "namespaces", "get") || !allows(clusterRoles.Items[0].Rules, "a.services.example.io", "providerconfigs", "list") {
 		t.Fatalf("provider cannot inspect its platform namespace: %#v", clusterRoles.Items)
 	}
-	for name, kind := range map[string]string{"example-a-config": "ServiceA", "example-b-config": "ServiceB"} {
+	for name, expected := range map[string]struct{ kind, image string }{
+		"example-a-config": {kind: "ServiceA", image: "example.test/a:v1"},
+		"example-b-config": {kind: "ServiceB", image: "example.test/b:v1"},
+	} {
 		sp := &providerv1alpha1.ServiceProvider{}
 		if err := platform.Get(ctx, client.ObjectKey{Name: name}, sp); err != nil {
 			t.Fatal(err)
 		}
-		if len(sp.Status.Resources) != 1 || sp.Status.Resources[0].Kind != kind {
+		if sp.Spec.Image != expected.image {
+			t.Fatalf("service provider %s has image %q, want %q", name, sp.Spec.Image, expected.image)
+		}
+		if len(sp.Status.Resources) != 1 || sp.Status.Resources[0].Kind != expected.kind {
 			t.Fatalf("service provider %s has wrong resources: %#v", name, sp.Status.Resources)
 		}
 	}
