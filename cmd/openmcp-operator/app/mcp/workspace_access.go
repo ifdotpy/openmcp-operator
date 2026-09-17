@@ -32,7 +32,7 @@ func workspaceAccessNamespace(ar *clustersv1alpha1.AccessRequest) string {
 	return "openmcp-access-" + string(ar.UID)
 }
 
-func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespace string, workspaceClient client.Client, workspaceClientset kubernetes.Interface, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference) error {
+func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespace string, workspaceClient client.Client, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference) error {
 	platform := r.platform.Client()
 	list := &clustersv1alpha1.AccessRequestList{}
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -70,7 +70,7 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 		if !resolved {
 			continue
 		}
-		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, r.credentialIssuer, bindingOwner); err != nil {
+		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, bindingOwner); err != nil {
 			return err
 		}
 		secretName := ar.Name + "-kubeconfig"
@@ -85,6 +85,20 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 			rotate = parseErr != nil || time.Until(expires) < r.tokenLifetime/3
 		}
 		if rotate {
+			issuerToken, err := workspaceIssuerToken(ctx, workspaceClient, ar)
+			if err != nil {
+				return err
+			}
+			clientsetForConfig := r.clientsetForConfig
+			if clientsetForConfig == nil {
+				clientsetForConfig = func(config *rest.Config) (kubernetes.Interface, error) {
+					return kubernetes.NewForConfig(config)
+				}
+			}
+			workspaceClientset, err := clientsetForConfig(workspaceIssuerConfig(workspaceConfig, issuerToken))
+			if err != nil {
+				return fmt.Errorf("create workspace credential issuer client: %w", err)
+			}
 			kubeconfig, expires, err := mintWorkspaceCredential(ctx, workspaceClientset, workspaceConfig, ar, r.tokenLifetime)
 			if err != nil {
 				return fmt.Errorf("mint workspace credential for %s: %w", ar.Name, err)
@@ -144,12 +158,9 @@ func (r *workspaceRuntime) resolveAccessRequest(ctx context.Context, ar *cluster
 	return true, r.platform.Client().Patch(ctx, ar, client.MergeFrom(old))
 }
 
-func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest, issuer string) ([]client.Object, error) {
+func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, error) {
 	if ar.UID == "" || ar.Spec.Token == nil {
 		return nil, fmt.Errorf("token AccessRequest UID is required")
-	}
-	if issuer == "" {
-		return nil, fmt.Errorf("workspace credential issuer is required")
 	}
 	data, err := json.Marshal(ar.Spec.Token)
 	if err != nil {
@@ -198,7 +209,7 @@ func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest, issuer string) ([
 		&rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: issuerRole, Namespace: accessNamespace, Labels: map[string]string{workspaceAccessOwnerLabel: owner}},
 			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: roleKind, Name: issuerRole},
-			Subjects:   []rbacv1.Subject{{Kind: "User", Name: issuer}},
+			Subjects:   []rbacv1.Subject{{Kind: serviceAccountKind, Name: credentialIssuerName, Namespace: accessNamespace}},
 		},
 	)
 	return out, nil
@@ -227,6 +238,10 @@ func workspaceOwnedUpsert(ctx context.Context, c client.Client, object client.Ob
 		case *rbacv1.ClusterRoleBinding:
 			want := desired.(*rbacv1.ClusterRoleBinding)
 			current.RoleRef, current.Subjects = want.RoleRef, want.Subjects
+		case *corev1.Secret:
+			want := desired.(*corev1.Secret)
+			current.Type = want.Type
+			current.Annotations = want.Annotations
 		}
 		return nil
 	})
@@ -255,8 +270,8 @@ func pruneWorkspaceGrants(ctx context.Context, c client.Client, owner string, ke
 	return nil
 }
 
-func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, issuer string, bindingOwner metav1.OwnerReference) error {
-	objects, err := workspaceGrantObjects(ar, issuer)
+func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, bindingOwner metav1.OwnerReference) error {
+	objects, err := workspaceGrantObjects(ar)
 	if err != nil {
 		if ar.UID != "" {
 			_ = pruneWorkspaceGrants(ctx, c, string(ar.UID), nil)
@@ -280,6 +295,23 @@ func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1a
 	if err := workspaceOwnedUpsert(ctx, c, sa, owner); err != nil {
 		return err
 	}
+	issuerServiceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: credentialIssuerName, Namespace: ns.Name, Labels: map[string]string{workspaceAccessOwnerLabel: owner}, OwnerReferences: []metav1.OwnerReference{bindingOwner}}}
+	if err := workspaceOwnedUpsert(ctx, c, issuerServiceAccount, owner); err != nil {
+		return err
+	}
+	issuerSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            workspaceIssuerSecretName(ar),
+			Namespace:       ns.Name,
+			Labels:          map[string]string{workspaceAccessOwnerLabel: owner},
+			Annotations:     map[string]string{corev1.ServiceAccountNameKey: credentialIssuerName},
+			OwnerReferences: []metav1.OwnerReference{bindingOwner},
+		},
+		Type: corev1.SecretTypeServiceAccountToken,
+	}
+	if err := workspaceOwnedUpsert(ctx, c, issuerSecret, owner); err != nil {
+		return err
+	}
 	for _, permission := range ar.Spec.Token.Permissions {
 		if permission.Namespace == "" {
 			continue
@@ -299,6 +331,38 @@ func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1a
 		}
 	}
 	return nil
+}
+
+func workspaceIssuerSecretName(ar *clustersv1alpha1.AccessRequest) string {
+	return "issuer-token-" + string(ar.UID)
+}
+
+func workspaceIssuerToken(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (string, error) {
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: workspaceAccessNamespace(ar), Name: workspaceIssuerSecretName(ar)}
+	if err := c.Get(ctx, key, secret); err != nil {
+		return "", fmt.Errorf("read workspace credential issuer token: %w", err)
+	}
+	token := string(secret.Data[corev1.ServiceAccountTokenKey])
+	if token == "" {
+		return "", fmt.Errorf("workspace credential issuer token is not ready")
+	}
+	return token, nil
+}
+
+func workspaceIssuerConfig(base *rest.Config, token string) *rest.Config {
+	config := rest.CopyConfig(base)
+	config.BearerToken = token
+	config.BearerTokenFile = ""
+	config.Username = ""
+	config.Password = ""
+	config.CertData = nil
+	config.KeyData = nil
+	config.CertFile = ""
+	config.KeyFile = ""
+	config.ExecProvider = nil
+	config.AuthProvider = nil
+	return config
 }
 
 func revokeWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {
