@@ -156,6 +156,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		cleanupDelay:      o.KCPWorkspaceCleanupDelay,
 		tokenLifetime:     o.KCPWorkspaceTokenLifetime,
 		providers:         o.KCPWorkspaceProviders,
+		credentialIssuer:  o.KCPWorkspaceCredentialIssuer,
 		kcpConfig:         cfg,
 	}
 	if o.KCPDisconnectGuardAddress != "" {

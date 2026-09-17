@@ -66,6 +66,7 @@ type workspaceRuntime struct {
 	cleanupDelay      time.Duration
 	tokenLifetime     time.Duration
 	providers         []workspaceProvider
+	credentialIssuer  string
 	disconnectGuard   *workspaceDisconnectGuard
 	kcpConfig         *rest.Config
 
