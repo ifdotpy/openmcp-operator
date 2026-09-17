@@ -254,7 +254,10 @@ func (r *workspaceRuntime) ensurePlatformRuntime(ctx context.Context, name multi
 func (r *workspaceRuntime) ensureServiceProvider(ctx context.Context, provider workspaceProvider) error {
 	c := r.platform.Client()
 	sp := &providerv1alpha1.ServiceProvider{ObjectMeta: metav1.ObjectMeta{Name: provider.ProviderName}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, sp, func() error { return nil }); err != nil {
+	if _, err := controllerutil.CreateOrUpdate(ctx, c, sp, func() error {
+		sp.Spec.Image = provider.Image
+		return nil
+	}); err != nil {
 		return fmt.Errorf("ensure %s ServiceProvider: %w", provider.Name, err)
 	}
 	old := sp.DeepCopy()
