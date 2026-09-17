@@ -11,6 +11,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -56,6 +57,17 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 	cfg, err := clientcmd.BuildConfigFromFlags("", o.KCPKubeconfig)
 	if err != nil {
 		return fmt.Errorf("unable to load kcp kubeconfig: %w", err)
+	}
+	discoveryClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("unable to create kcp discovery client: %w", err)
+	}
+	endpointSlice := &kcpapisv1alpha1.APIExportEndpointSlice{}
+	if err := discoveryClient.Get(ctx, client.ObjectKey{Name: o.KCPEndpointSlice}, endpointSlice); err != nil {
+		return fmt.Errorf("unable to read APIExportEndpointSlice %q: %w", o.KCPEndpointSlice, err)
+	}
+	if endpointSlice.Spec.APIExport.Name == "" {
+		return fmt.Errorf("APIExportEndpointSlice %q has no APIExport name", o.KCPEndpointSlice)
 	}
 
 	logr := setupLog.Logr()
@@ -139,6 +151,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		platform:          o.PlatformCluster,
 		environment:       o.Environment,
 		bindingName:       o.KCPBindingName,
+		bindingExport:     endpointSlice.Spec.APIExport,
 		reconcileInterval: o.KCPWorkspaceReconcileInterval,
 		cleanupDelay:      o.KCPWorkspaceCleanupDelay,
 		tokenLifetime:     o.KCPWorkspaceTokenLifetime,
@@ -152,7 +165,7 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 				return fmt.Errorf("read disconnect guard CA: %w", err)
 			}
 		}
-		runtime.disconnectGuard = &workspaceDisconnectGuard{bindingName: o.KCPBindingName, url: o.KCPDisconnectGuardURL, caBundle: ca}
+		runtime.disconnectGuard = &workspaceDisconnectGuard{url: o.KCPDisconnectGuardURL, caBundle: ca}
 		mux := http.NewServeMux()
 		mux.Handle("/disconnect", disconnectguard.Handler{Inspect: runtime.disconnectInspector().Check})
 		if err := mcMgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {

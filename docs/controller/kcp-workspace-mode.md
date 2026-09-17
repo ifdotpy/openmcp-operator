@@ -5,7 +5,7 @@ KCP workspace mode watches one `APIExportEndpointSlice`. Each engaged KCP worksp
 The operator uses no Platform Mesh API. It uses these KCP signals:
 
 - APIExport engagement starts the workspace runtime.
-- The configured `APIBinding` owns all workspace resources.
+- The `APIBinding` for the endpoint slice export owns all workspace resources.
 - APIExport disengagement removes the workspace runtime after the cleanup delay.
 
 The operator creates `ControlPlane/default` in the engaged workspace. It registers the same workspace for onboarding and MCP use. It does not create a nested Kubernetes cluster.
@@ -15,8 +15,9 @@ Enable the mode with these flags:
 ```text
 --kcp-endpoint-slice=<APIExportEndpointSlice name>
 --kcp-kubeconfig=<provider workspace kubeconfig>
---kcp-binding-name=<APIBinding name>
 ```
+
+The operator reads the export reference from the endpoint slice. It then finds the matching `APIBinding` in each workspace. Use the optional `--kcp-binding-name` flag only to prefer a stable binding name when one exists.
 
 Use `--kcp-service-providers` to supply optional service providers. The file contains a JSON array:
 
