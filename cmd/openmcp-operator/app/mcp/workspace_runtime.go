@@ -42,6 +42,7 @@ const (
 	workspaceAccessFinalizer  = "workspace.openmcp.cloud/access"
 	clusterRoleKind           = "ClusterRole"
 	controllerName            = "controller"
+	credentialIssuerName      = "credential-issuer"
 	providerServiceAccount    = "service-provider"
 	providerRoleName          = "service-provider"
 	providerClusterRolePrefix = "openmcp-workspace-"
@@ -57,18 +58,18 @@ const (
 )
 
 type workspaceRuntime struct {
-	log               logging.Logger
-	platform          *controllerclusters.Cluster
-	environment       string
-	bindingName       string
-	bindingExport     kcpapisv1alpha1.ExportBindingReference
-	reconcileInterval time.Duration
-	cleanupDelay      time.Duration
-	tokenLifetime     time.Duration
-	providers         []workspaceProvider
-	credentialIssuer  string
-	disconnectGuard   *workspaceDisconnectGuard
-	kcpConfig         *rest.Config
+	log                logging.Logger
+	platform           *controllerclusters.Cluster
+	environment        string
+	bindingName        string
+	bindingExport      kcpapisv1alpha1.ExportBindingReference
+	reconcileInterval  time.Duration
+	cleanupDelay       time.Duration
+	tokenLifetime      time.Duration
+	providers          []workspaceProvider
+	disconnectGuard    *workspaceDisconnectGuard
+	kcpConfig          *rest.Config
+	clientsetForConfig func(*rest.Config) (kubernetes.Interface, error)
 
 	mu          sync.Mutex
 	generations map[multicluster.ClusterName]uint64
@@ -106,13 +107,8 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 		log.Error(err, "unable to create direct workspace configuration")
 		return
 	}
-	workspaceClientset, err := kubernetes.NewForConfig(workspaceConfig)
-	if err != nil {
-		log.Error(err, "unable to create workspace clientset")
-		return
-	}
 	reconcile := func() {
-		if err := r.reconcile(ctx, name, cl, workspaceClientset, workspaceConfig); err != nil && ctx.Err() == nil {
+		if err := r.reconcile(ctx, name, cl, workspaceConfig); err != nil && ctx.Err() == nil {
 			log.Error(err, "workspace runtime reconciliation failed")
 		}
 	}
@@ -130,7 +126,7 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 	}
 }
 
-func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceClientset kubernetes.Interface, workspaceConfig *rest.Config) error {
+func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceConfig *rest.Config) error {
 	binding, err := r.workspaceBinding(ctx, cl.GetClient())
 	if err != nil {
 		return err
@@ -156,7 +152,7 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	if err := r.reconcileClusterRequests(ctx, platformNamespace); err != nil {
 		return err
 	}
-	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceClientset, workspaceConfig, owner)
+	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceConfig, owner)
 }
 
 func directWorkspaceConfig(base *rest.Config, name multicluster.ClusterName) (*rest.Config, error) {

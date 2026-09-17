@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	clientgotesting "k8s.io/client-go/testing"
@@ -63,13 +64,12 @@ func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client)
 		t.Fatal(err)
 	}
 	r := &workspaceRuntime{
-		log:              log,
-		platform:         controllerclusters.NewTestClusterFromClient("platform", platform),
-		environment:      "test",
-		bindingName:      "services",
-		bindingExport:    kcpapisv1alpha1.ExportBindingReference{Path: "root:providers", Name: "services.example.io"},
-		tokenLifetime:    time.Hour,
-		credentialIssuer: "system:serviceaccount:workspace-services-system:workspace-operator",
+		log:           log,
+		platform:      controllerclusters.NewTestClusterFromClient("platform", platform),
+		environment:   "test",
+		bindingName:   "services",
+		bindingExport: kcpapisv1alpha1.ExportBindingReference{Path: "root:providers", Name: "services.example.io"},
+		tokenLifetime: time.Hour,
 		providers: []workspaceProvider{
 			{Name: "example-a", Image: "example.test/a:v1", ProviderName: "example-a-config", Resource: metav1.GroupVersionKind{Group: "a.services.example.io", Version: "v1alpha1", Kind: "ServiceA"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"a.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
 			{Name: "example-b", Image: "example.test/b:v1", ProviderName: "example-b-config", Resource: metav1.GroupVersionKind{Group: "b.services.example.io", Version: "v1alpha1", Kind: "ServiceB"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"b.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
@@ -313,8 +313,9 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 		}
 		return true, &authv1.TokenRequest{Status: authv1.TokenRequestStatus{Token: "workspace-token", ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour))}}, nil
 	})
+	configureTestWorkspaceIssuer(t, r, workspace, access, clientset)
 	config := &rest.Config{Host: "https://kcp.example/clusters/root:tenants:demo", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("workspace-ca")}}
-	if err := r.reconcileAccessRequests(ctx, platformNamespace, workspace, clientset, config, testBindingOwner()); err != nil {
+	if err := r.reconcileAccessRequests(ctx, platformNamespace, workspace, config, testBindingOwner()); err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(access), access); err != nil {
@@ -341,6 +342,12 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 	if len(grants.Items) != 1 || len(grants.Items[0].OwnerReferences) != 1 || grants.Items[0].OwnerReferences[0].UID != testBindingOwner().UID {
 		t.Fatalf("workspace access is not owned by the APIBinding: %#v", grants.Items)
 	}
+	assertWorkspaceIssuer(t, workspace, access)
+}
+
+func assertWorkspaceIssuer(t *testing.T, workspace client.Client, access *clustersv1alpha1.AccessRequest) {
+	t.Helper()
+	ctx := context.Background()
 	issuerRoles := &rbacv1.RoleList{}
 	if err := workspace.List(ctx, issuerRoles, client.InNamespace(workspaceAccessNamespace(access)), client.MatchingLabels{workspaceAccessOwnerLabel: string(access.UID)}); err != nil {
 		t.Fatal(err)
@@ -352,8 +359,32 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 	if err := workspace.List(ctx, issuerBindings, client.InNamespace(workspaceAccessNamespace(access)), client.MatchingLabels{workspaceAccessOwnerLabel: string(access.UID)}); err != nil {
 		t.Fatal(err)
 	}
-	if len(issuerBindings.Items) != 1 || len(issuerBindings.Items[0].Subjects) != 1 || issuerBindings.Items[0].Subjects[0].Name != "system:serviceaccount:workspace-services-system:workspace-operator" {
+	if len(issuerBindings.Items) != 1 || len(issuerBindings.Items[0].Subjects) != 1 || issuerBindings.Items[0].Subjects[0].Kind != serviceAccountKind || issuerBindings.Items[0].Subjects[0].Name != credentialIssuerName || issuerBindings.Items[0].Subjects[0].Namespace != workspaceAccessNamespace(access) {
 		t.Fatalf("workspace credential issuer binding is wrong: %#v", issuerBindings.Items)
+	}
+	issuerSecret := &corev1.Secret{}
+	if err := workspace.Get(ctx, client.ObjectKey{Name: workspaceIssuerSecretName(access), Namespace: workspaceAccessNamespace(access)}, issuerSecret); err != nil {
+		t.Fatal(err)
+	}
+	if issuerSecret.Type != corev1.SecretTypeServiceAccountToken || issuerSecret.Annotations[corev1.ServiceAccountNameKey] != credentialIssuerName {
+		t.Fatalf("workspace credential issuer Secret is wrong: %#v", issuerSecret)
+	}
+}
+
+func configureTestWorkspaceIssuer(t *testing.T, r *workspaceRuntime, workspace client.Client, access *clustersv1alpha1.AccessRequest, clientset kubernetes.Interface) {
+	t.Helper()
+	r.clientsetForConfig = func(config *rest.Config) (kubernetes.Interface, error) {
+		if config.BearerToken != "issuer-token" {
+			t.Fatalf("workspace issuer token not used: %#v", config)
+		}
+		return clientset, nil
+	}
+	issuerSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: workspaceIssuerSecretName(access), Namespace: workspaceAccessNamespace(access)},
+		Data:       map[string][]byte{corev1.ServiceAccountTokenKey: []byte("issuer-token")},
+	}
+	if err := workspace.Create(context.Background(), issuerSecret); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -437,7 +468,7 @@ func TestWorkspaceRuntimeRefusesForeignRBACAdoption(t *testing.T) {
 			Name: "foreign", Namespace: "target", Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}}},
 		}}}},
 	}
-	err := ensureWorkspaceAccess(ctx, workspace, access, "workspace-operator", testBindingOwner())
+	err := ensureWorkspaceAccess(ctx, workspace, access, testBindingOwner())
 	if err == nil || !strings.Contains(err.Error(), "refusing to adopt foreign") {
 		t.Fatalf("foreign RBAC object was adopted: %v", err)
 	}
