@@ -63,12 +63,13 @@ func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client)
 		t.Fatal(err)
 	}
 	r := &workspaceRuntime{
-		log:           log,
-		platform:      controllerclusters.NewTestClusterFromClient("platform", platform),
-		environment:   "test",
-		bindingName:   "services",
-		bindingExport: kcpapisv1alpha1.ExportBindingReference{Path: "root:providers", Name: "services.example.io"},
-		tokenLifetime: time.Hour,
+		log:              log,
+		platform:         controllerclusters.NewTestClusterFromClient("platform", platform),
+		environment:      "test",
+		bindingName:      "services",
+		bindingExport:    kcpapisv1alpha1.ExportBindingReference{Path: "root:providers", Name: "services.example.io"},
+		tokenLifetime:    time.Hour,
+		credentialIssuer: "system:serviceaccount:workspace-services-system:workspace-operator",
 		providers: []workspaceProvider{
 			{Name: "example-a", Image: "example.test/a:v1", ProviderName: "example-a-config", Resource: metav1.GroupVersionKind{Group: "a.services.example.io", Version: "v1alpha1", Kind: "ServiceA"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"a.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
 			{Name: "example-b", Image: "example.test/b:v1", ProviderName: "example-b-config", Resource: metav1.GroupVersionKind{Group: "b.services.example.io", Version: "v1alpha1", Kind: "ServiceB"}, ClusterRoleRules: []rbacv1.PolicyRule{{APIGroups: []string{"b.services.example.io"}, Resources: []string{"providerconfigs"}, Verbs: []string{"get", "list", "watch"}}}},
@@ -306,9 +307,6 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientset := fake.NewSimpleClientset()
-	clientset.PrependReactor("create", "selfsubjectreviews", func(action clientgotesting.Action) (bool, runtime.Object, error) {
-		return true, &authv1.SelfSubjectReview{Status: authv1.SelfSubjectReviewStatus{UserInfo: authv1.UserInfo{Username: "system:serviceaccount:workspace-services-system:workspace-operator"}}}, nil
-	})
 	clientset.PrependReactor("create", "serviceaccounts", func(action clientgotesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil

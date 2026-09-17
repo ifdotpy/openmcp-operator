@@ -38,7 +38,6 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list AccessRequests: %w", err)
 	}
-	issuer := ""
 	for i := range list.Items {
 		ar := &list.Items[i]
 		if !ar.DeletionTimestamp.IsZero() {
@@ -59,13 +58,6 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 		if ar.Spec.Token == nil {
 			continue
 		}
-		if issuer == "" {
-			resolvedIssuer, issuerErr := workspaceCredentialIssuer(ctx, workspaceClientset)
-			if issuerErr != nil {
-				return issuerErr
-			}
-			issuer = resolvedIssuer
-		}
 		if controllerutil.AddFinalizer(ar, workspaceAccessFinalizer) {
 			if err := platform.Update(ctx, ar); err != nil {
 				return err
@@ -78,7 +70,7 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 		if !resolved {
 			continue
 		}
-		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, issuer, bindingOwner); err != nil {
+		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, r.credentialIssuer, bindingOwner); err != nil {
 			return err
 		}
 		secretName := ar.Name + "-kubeconfig"
@@ -307,17 +299,6 @@ func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1a
 		}
 	}
 	return nil
-}
-
-func workspaceCredentialIssuer(ctx context.Context, c kubernetes.Interface) (string, error) {
-	review, err := c.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})
-	if err != nil {
-		return "", fmt.Errorf("discover workspace credential issuer: %w", err)
-	}
-	if review.Status.UserInfo.Username == "" {
-		return "", fmt.Errorf("discover workspace credential issuer: API server returned no username")
-	}
-	return review.Status.UserInfo.Username, nil
 }
 
 func revokeWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {

@@ -64,6 +64,7 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.KCPEndpointSlice, "kcp-endpoint-slice", "", "Multicluster (kcp) mode: name of the APIExportEndpointSlice serving the tenant workspaces. Empty disables the mode.")
 	cmd.Flags().StringVar(&o.KCPKubeconfig, "kcp-kubeconfig", "", "Multicluster (kcp) mode: kubeconfig path for the workspace holding the APIExportEndpointSlice.")
 	cmd.Flags().StringVar(&o.KCPServiceProviders, "kcp-service-providers", "", "Multicluster (kcp) mode: path to the JSON service-provider configuration. Empty deploys no service providers.")
+	cmd.Flags().StringVar(&o.KCPWorkspaceCredentialIssuer, "kcp-workspace-credential-issuer", "", "Multicluster (kcp) mode: authenticated username allowed to issue scoped provider tokens in tenant workspaces.")
 	cmd.Flags().DurationVar(&o.KCPWorkspaceReconcileInterval, "kcp-workspace-reconcile-interval", 5*time.Second, "Multicluster (kcp) mode: interval for workspace runtime reconciliation.")
 	cmd.Flags().DurationVar(&o.KCPWorkspaceCleanupDelay, "kcp-workspace-cleanup-delay", time.Minute, "Multicluster (kcp) mode: delay before platform runtime removal after disengagement.")
 	cmd.Flags().DurationVar(&o.KCPWorkspaceTokenLifetime, "kcp-workspace-token-lifetime", time.Hour, "Multicluster (kcp) mode: lifetime of workspace-only provider credentials.")
@@ -90,6 +91,7 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 
 type RawRunOptions struct {
 	KCPServiceProviders           string        `json:"kcp-service-providers"`
+	KCPWorkspaceCredentialIssuer  string        `json:"kcp-workspace-credential-issuer"`
 	KCPWorkspaceReconcileInterval time.Duration `json:"kcp-workspace-reconcile-interval"`
 	KCPWorkspaceCleanupDelay      time.Duration `json:"kcp-workspace-cleanup-delay"`
 	KCPWorkspaceTokenLifetime     time.Duration `json:"kcp-workspace-token-lifetime"`
@@ -177,6 +179,9 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 			return err
 		}
 		o.KCPWorkspaceProviders = providers
+		if len(providers) > 0 && o.KCPWorkspaceCredentialIssuer == "" {
+			return fmt.Errorf("kcp-workspace-credential-issuer must not be empty when kcp service providers are configured")
+		}
 		guard := []string{o.KCPDisconnectGuardAddress, o.KCPDisconnectGuardURL, o.KCPDisconnectGuardCert, o.KCPDisconnectGuardKey}
 		configured := 0
 		for _, value := range guard {
