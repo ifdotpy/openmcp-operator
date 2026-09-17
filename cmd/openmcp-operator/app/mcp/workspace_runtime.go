@@ -255,12 +255,17 @@ func (r *workspaceRuntime) ensureServiceProvider(ctx context.Context, provider w
 	c := r.platform.Client()
 	sp := &providerv1alpha1.ServiceProvider{ObjectMeta: metav1.ObjectMeta{Name: provider.ProviderName}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, c, sp, func() error {
+		if sp.Annotations == nil {
+			sp.Annotations = map[string]string{}
+		}
+		sp.Annotations[apiconst.OperationAnnotation] = apiconst.OperationAnnotationValueIgnore
 		sp.Spec.Image = provider.Image
 		return nil
 	}); err != nil {
 		return fmt.Errorf("ensure %s ServiceProvider: %w", provider.Name, err)
 	}
 	old := sp.DeepCopy()
+	sp.Status.ObservedGeneration = sp.Generation
 	sp.Status.Resources = []metav1.GroupVersionKind{provider.Resource}
 	if err := c.Status().Patch(ctx, sp, client.MergeFrom(old)); err != nil {
 		return fmt.Errorf("register %s service resource: %w", provider.Name, err)

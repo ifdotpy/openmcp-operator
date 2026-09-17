@@ -30,6 +30,7 @@ import (
 
 	clustersv1alpha1 "github.com/openmcp-project/openmcp-operator/api/clusters/v1alpha1"
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
+	apiconst "github.com/openmcp-project/openmcp-operator/api/constants"
 	corev2alpha1 "github.com/openmcp-project/openmcp-operator/api/core/v2alpha1"
 	providerv1alpha1 "github.com/openmcp-project/openmcp-operator/api/provider/v1alpha1"
 	libutils "github.com/openmcp-project/openmcp-operator/lib/utils"
@@ -193,6 +194,12 @@ func TestWorkspaceRuntimeUsesWorkspaceAsOnlyCluster(t *testing.T) {
 		}
 		if sp.Spec.Image != expected.image {
 			t.Fatalf("service provider %s has image %q, want %q", name, sp.Spec.Image, expected.image)
+		}
+		if sp.Annotations[apiconst.OperationAnnotation] != apiconst.OperationAnnotationValueIgnore {
+			t.Fatalf("service provider %s is not excluded from platform-wide installation", name)
+		}
+		if sp.Status.ObservedGeneration != sp.Generation {
+			t.Fatalf("service provider %s observed generation %d, want %d", name, sp.Status.ObservedGeneration, sp.Generation)
 		}
 		if len(sp.Status.Resources) != 1 || sp.Status.Resources[0].Kind != expected.kind {
 			t.Fatalf("service provider %s has wrong resources: %#v", name, sp.Status.Resources)
