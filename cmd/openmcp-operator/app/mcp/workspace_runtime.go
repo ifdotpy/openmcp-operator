@@ -29,6 +29,7 @@ import (
 	clustersv1alpha1 "github.com/openmcp-project/openmcp-operator/api/clusters/v1alpha1"
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
 	apiconst "github.com/openmcp-project/openmcp-operator/api/constants"
+	corev2alpha1 "github.com/openmcp-project/openmcp-operator/api/core/v2alpha1"
 	providerv1alpha1 "github.com/openmcp-project/openmcp-operator/api/provider/v1alpha1"
 	libutils "github.com/openmcp-project/openmcp-operator/lib/utils"
 )
@@ -443,11 +444,64 @@ func (r *workspaceRuntime) scheduleCleanup(name multicluster.ClusterName, genera
 		r.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		r.cleanupWorkspaceAccess(name, workspaceClient, log)
 		if err := r.cleanupPlatform(ctx, name); err != nil {
 			log.Error(err, "workspace runtime cleanup failed")
+			return
 		}
+		if err := r.finalizeWorkspaceControlPlanes(ctx, name, workspaceClient); err != nil {
+			log.Error(err, "workspace ControlPlane cleanup failed")
+			return
+		}
+		r.cleanupWorkspaceAccess(name, workspaceClient, log)
 	})
+}
+
+func (r *workspaceRuntime) finalizeWorkspaceControlPlanes(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client) error {
+	platformNamespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceControlPlaneNamespace(name))
+	if err != nil {
+		return err
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		ns := &corev1.Namespace{}
+		err := r.platform.Client().Get(ctx, client.ObjectKey{Name: platformNamespace}, ns)
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("get platform namespace %q: %w", platformNamespace, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for platform namespace %q: %w", platformNamespace, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+
+	controlPlanes := &corev2alpha1.ControlPlaneList{}
+	if err := workspaceClient.List(ctx, controlPlanes, client.InNamespace(workspaceControlPlaneNamespace(name))); err != nil {
+		return fmt.Errorf("list workspace ControlPlanes: %w", err)
+	}
+	for i := range controlPlanes.Items {
+		controlPlane := &controlPlanes.Items[i]
+		if controlPlane.DeletionTimestamp.IsZero() {
+			continue
+		}
+		old := controlPlane.DeepCopy()
+		finalizers := controlPlane.Finalizers[:0]
+		for _, finalizer := range controlPlane.Finalizers {
+			if finalizer == corev2alpha1.MCPFinalizer || strings.HasPrefix(finalizer, corev2alpha1.ClusterRequestFinalizerPrefix) {
+				continue
+			}
+			finalizers = append(finalizers, finalizer)
+		}
+		controlPlane.Finalizers = finalizers
+		if err := workspaceClient.Patch(ctx, controlPlane, client.MergeFrom(old)); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("finalize workspace ControlPlane %s/%s: %w", controlPlane.Namespace, controlPlane.Name, err)
+		}
+	}
+	return nil
 }
 
 func (r *workspaceRuntime) cleanupPlatform(ctx context.Context, name multicluster.ClusterName) error {
