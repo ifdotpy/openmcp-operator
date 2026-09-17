@@ -32,7 +32,7 @@ func workspaceControlPlaneNamespace(name multicluster.ClusterName) string {
 }
 
 // defaultControlPlaneBootstrapper creates one ControlPlane named "default" in
-// an workspace workspace. The marker Secret preserves a deliberate deletion.
+// a KCP workspace. The marker Secret preserves a deliberate deletion.
 type defaultControlPlaneBootstrapper struct {
 	log logging.Logger
 }
