@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocp-e2e-proof
+  namespace: demo
+data:
+  result: account-workspace-is-control-plane
