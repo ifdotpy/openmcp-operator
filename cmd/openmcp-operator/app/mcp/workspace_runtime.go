@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -64,6 +67,7 @@ type workspaceRuntime struct {
 	tokenLifetime     time.Duration
 	providers         []workspaceProvider
 	disconnectGuard   *workspaceDisconnectGuard
+	kcpConfig         *rest.Config
 
 	mu          sync.Mutex
 	generations map[multicluster.ClusterName]uint64
@@ -96,13 +100,18 @@ func (r *workspaceRuntime) Engage(ctx context.Context, name multicluster.Cluster
 }
 
 func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterName, generation uint64, cl cluster.Cluster, log logging.Logger) {
-	workspaceClientset, err := kubernetes.NewForConfig(cl.GetConfig())
+	workspaceConfig, err := directWorkspaceConfig(r.kcpConfig, name)
+	if err != nil {
+		log.Error(err, "unable to create direct workspace configuration")
+		return
+	}
+	workspaceClientset, err := kubernetes.NewForConfig(workspaceConfig)
 	if err != nil {
 		log.Error(err, "unable to create workspace clientset")
 		return
 	}
 	reconcile := func() {
-		if err := r.reconcile(ctx, name, cl, workspaceClientset); err != nil && ctx.Err() == nil {
+		if err := r.reconcile(ctx, name, cl, workspaceClientset, workspaceConfig); err != nil && ctx.Err() == nil {
 			log.Error(err, "workspace runtime reconciliation failed")
 		}
 	}
@@ -120,7 +129,7 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 	}
 }
 
-func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceClientset kubernetes.Interface) error {
+func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceClientset kubernetes.Interface, workspaceConfig *rest.Config) error {
 	binding, err := r.workspaceBinding(ctx, cl.GetClient())
 	if err != nil {
 		return err
@@ -140,13 +149,35 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	if err != nil {
 		return err
 	}
-	if err := r.ensurePlatformRuntime(ctx, name, platformNamespace, cl.GetConfig().Host); err != nil {
+	if err := r.ensurePlatformRuntime(ctx, name, platformNamespace, workspaceConfig.Host); err != nil {
 		return err
 	}
 	if err := r.reconcileClusterRequests(ctx, platformNamespace); err != nil {
 		return err
 	}
-	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceClientset, cl.GetConfig(), owner)
+	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceClientset, workspaceConfig, owner)
+}
+
+func directWorkspaceConfig(base *rest.Config, name multicluster.ClusterName) (*rest.Config, error) {
+	if base == nil {
+		return nil, fmt.Errorf("kcp configuration is required")
+	}
+	parsed, err := url.Parse(base.Host)
+	if err != nil {
+		return nil, fmt.Errorf("parse kcp host: %w", err)
+	}
+	const marker = "/clusters/"
+	index := strings.Index(parsed.Path, marker)
+	if parsed.Scheme == "" || parsed.Host == "" || index < 0 || name == "" {
+		return nil, fmt.Errorf("kcp host %q cannot address workspace %q", base.Host, name)
+	}
+	parsed.Path = parsed.Path[:index] + marker + url.PathEscape(string(name))
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	config := rest.CopyConfig(base)
+	config.Host = parsed.String()
+	return config, nil
 }
 
 func (r *workspaceRuntime) workspaceBinding(ctx context.Context, c client.Client) (*kcpapisv1alpha1.APIBinding, error) {
