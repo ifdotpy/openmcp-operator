@@ -38,6 +38,7 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list AccessRequests: %w", err)
 	}
+	issuer := ""
 	for i := range list.Items {
 		ar := &list.Items[i]
 		if !ar.DeletionTimestamp.IsZero() {
@@ -58,6 +59,13 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 		if ar.Spec.Token == nil {
 			continue
 		}
+		if issuer == "" {
+			resolvedIssuer, issuerErr := workspaceCredentialIssuer(ctx, workspaceClientset)
+			if issuerErr != nil {
+				return issuerErr
+			}
+			issuer = resolvedIssuer
+		}
 		if controllerutil.AddFinalizer(ar, workspaceAccessFinalizer) {
 			if err := platform.Update(ctx, ar); err != nil {
 				return err
@@ -70,7 +78,7 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 		if !resolved {
 			continue
 		}
-		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, bindingOwner); err != nil {
+		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, issuer, bindingOwner); err != nil {
 			return err
 		}
 		secretName := ar.Name + "-kubeconfig"
@@ -144,9 +152,12 @@ func (r *workspaceRuntime) resolveAccessRequest(ctx context.Context, ar *cluster
 	return true, r.platform.Client().Patch(ctx, ar, client.MergeFrom(old))
 }
 
-func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, error) {
+func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest, issuer string) ([]client.Object, error) {
 	if ar.UID == "" || ar.Spec.Token == nil {
 		return nil, fmt.Errorf("token AccessRequest UID is required")
+	}
+	if issuer == "" {
+		return nil, fmt.Errorf("workspace credential issuer is required")
 	}
 	data, err := json.Marshal(ar.Spec.Token)
 	if err != nil {
@@ -185,6 +196,19 @@ func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object,
 		}
 		bind(fmt.Sprintf("%s-r%d", prefix, i), ref.Namespace, rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: ref.Kind, Name: ref.Name})
 	}
+	issuerRole := prefix + "-issuer"
+	accessNamespace := workspaceAccessNamespace(ar)
+	out = append(out,
+		&rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Name: issuerRole, Namespace: accessNamespace, Labels: map[string]string{workspaceAccessOwnerLabel: owner}},
+			Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, ResourceNames: []string{controllerName}, Verbs: []string{verbCreate}}},
+		},
+		&rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: issuerRole, Namespace: accessNamespace, Labels: map[string]string{workspaceAccessOwnerLabel: owner}},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: roleKind, Name: issuerRole},
+			Subjects:   []rbacv1.Subject{{Kind: "User", Name: issuer}},
+		},
+	)
 	return out, nil
 }
 
@@ -239,8 +263,8 @@ func pruneWorkspaceGrants(ctx context.Context, c client.Client, owner string, ke
 	return nil
 }
 
-func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, bindingOwner metav1.OwnerReference) error {
-	objects, err := workspaceGrantObjects(ar)
+func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, issuer string, bindingOwner metav1.OwnerReference) error {
+	objects, err := workspaceGrantObjects(ar, issuer)
 	if err != nil {
 		if ar.UID != "" {
 			_ = pruneWorkspaceGrants(ctx, c, string(ar.UID), nil)
@@ -283,6 +307,17 @@ func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1a
 		}
 	}
 	return nil
+}
+
+func workspaceCredentialIssuer(ctx context.Context, c kubernetes.Interface) (string, error) {
+	review, err := c.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("discover workspace credential issuer: %w", err)
+	}
+	if review.Status.UserInfo.Username == "" {
+		return "", fmt.Errorf("discover workspace credential issuer: API server returned no username")
+	}
+	return review.Status.UserInfo.Username, nil
 }
 
 func revokeWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {

@@ -306,6 +306,9 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientset := fake.NewSimpleClientset()
+	clientset.PrependReactor("create", "selfsubjectreviews", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, &authv1.SelfSubjectReview{Status: authv1.SelfSubjectReviewStatus{UserInfo: authv1.UserInfo{Username: "system:serviceaccount:workspace-services-system:workspace-operator"}}}, nil
+	})
 	clientset.PrependReactor("create", "serviceaccounts", func(action clientgotesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil
@@ -339,6 +342,20 @@ func TestWorkspaceRuntimeIssuesScopedCredential(t *testing.T) {
 	}
 	if len(grants.Items) != 1 || len(grants.Items[0].OwnerReferences) != 1 || grants.Items[0].OwnerReferences[0].UID != testBindingOwner().UID {
 		t.Fatalf("workspace access is not owned by the APIBinding: %#v", grants.Items)
+	}
+	issuerRoles := &rbacv1.RoleList{}
+	if err := workspace.List(ctx, issuerRoles, client.InNamespace(workspaceAccessNamespace(access)), client.MatchingLabels{workspaceAccessOwnerLabel: string(access.UID)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuerRoles.Items) != 1 || !allows(issuerRoles.Items[0].Rules, "", "serviceaccounts/token", verbCreate) {
+		t.Fatalf("workspace credential issuer has wrong access: %#v", issuerRoles.Items)
+	}
+	issuerBindings := &rbacv1.RoleBindingList{}
+	if err := workspace.List(ctx, issuerBindings, client.InNamespace(workspaceAccessNamespace(access)), client.MatchingLabels{workspaceAccessOwnerLabel: string(access.UID)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuerBindings.Items) != 1 || len(issuerBindings.Items[0].Subjects) != 1 || issuerBindings.Items[0].Subjects[0].Name != "system:serviceaccount:workspace-services-system:workspace-operator" {
+		t.Fatalf("workspace credential issuer binding is wrong: %#v", issuerBindings.Items)
 	}
 }
 
@@ -422,7 +439,7 @@ func TestWorkspaceRuntimeRefusesForeignRBACAdoption(t *testing.T) {
 			Name: "foreign", Namespace: "target", Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}}},
 		}}}},
 	}
-	err := ensureWorkspaceAccess(ctx, workspace, access, testBindingOwner())
+	err := ensureWorkspaceAccess(ctx, workspace, access, "workspace-operator", testBindingOwner())
 	if err == nil || !strings.Contains(err.Error(), "refusing to adopt foreign") {
 		t.Fatalf("foreign RBAC object was adopted: %v", err)
 	}
