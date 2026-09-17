@@ -119,6 +119,35 @@ func TestWorkspaceNamespaceIsStableAndDistinct(t *testing.T) {
 	}
 }
 
+func TestDirectWorkspaceConfigUsesLogicalClusterEndpoint(t *testing.T) {
+	base := &rest.Config{
+		Host:        "https://kcp.example/prefix/clusters/root:providers:opencontrolplane?old=true#fragment",
+		BearerToken: "operator-token",
+		TLSClientConfig: rest.TLSClientConfig{
+			CAData: []byte("workspace-ca"),
+		},
+	}
+	got, err := directWorkspaceConfig(base, multicluster.ClusterName("92xa9couy27y62m5"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Host != "https://kcp.example/prefix/clusters/92xa9couy27y62m5" {
+		t.Fatalf("wrong workspace endpoint: %q", got.Host)
+	}
+	if got.BearerToken != base.BearerToken || string(got.CAData) != string(base.CAData) {
+		t.Fatal("workspace configuration did not preserve authentication")
+	}
+	if base.Host == got.Host {
+		t.Fatal("base configuration was modified")
+	}
+}
+
+func TestDirectWorkspaceConfigRejectsNonKCPHost(t *testing.T) {
+	if _, err := directWorkspaceConfig(&rest.Config{Host: "https://kubernetes.example"}, "workspace"); err == nil {
+		t.Fatal("non-kcp host was accepted")
+	}
+}
+
 func TestWorkspaceRuntimeUsesWorkspaceAsOnlyCluster(t *testing.T) {
 	ctx := context.Background()
 	r, platform, workspace := testRuntime(t)
