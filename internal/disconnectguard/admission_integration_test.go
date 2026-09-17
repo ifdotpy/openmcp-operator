@@ -30,7 +30,7 @@ func TestLocalAPIServerAdmission(t *testing.T) {
 		preserve := true
 		return &apiextensions.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: plural + "." + group}, Spec: apiextensions.CustomResourceDefinitionSpec{Group: group, Scope: scope, Names: apiextensions.CustomResourceDefinitionNames{Kind: kind, Plural: plural}, Versions: []apiextensions.CustomResourceDefinitionVersion{{Name: "v1alpha1", Served: true, Storage: true, Schema: &apiextensions.CustomResourceValidation{OpenAPIV3Schema: &apiextensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: &preserve}}}}}}
 	}
-	environment := &envtest.Environment{CRDs: []*apiextensions.CustomResourceDefinition{crd("apis.kcp.io", "APIBinding", "apibindings", apiextensions.ClusterScoped), crd("flux.test.io", "Flux", "fluxes", apiextensions.NamespaceScoped)}}
+	environment := &envtest.Environment{CRDs: []*apiextensions.CustomResourceDefinition{crd("apis.kcp.io", "APIBinding", "apibindings", apiextensions.ClusterScoped), crd("services.test.io", "Example", "examples", apiextensions.NamespaceScoped)}}
 	cfg, err := environment.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -48,15 +48,15 @@ func TestLocalAPIServerAdmission(t *testing.T) {
 	defer cancel()
 	binding := &unstructured.Unstructured{}
 	binding.SetGroupVersionKind(schema.GroupVersionKind{Group: "apis.kcp.io", Version: "v1alpha1", Kind: "APIBinding"})
-	binding.SetName("ocp")
-	binding.SetAnnotations(map[string]string{"kcp.io/cluster": "account"})
+	binding.SetName("services")
+	binding.SetAnnotations(map[string]string{"kcp.io/cluster": "workspace"})
 	if err := c.Create(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Create(ctx, &core.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "custom"}}); err != nil {
 		t.Fatal(err)
 	}
-	serviceGVK := schema.GroupVersionKind{Group: "flux.test.io", Version: "v1alpha1", Kind: "Flux"}
+	serviceGVK := schema.GroupVersionKind{Group: "services.test.io", Version: "v1alpha1", Kind: "Example"}
 	order := &unstructured.Unstructured{}
 	order.SetGroupVersionKind(serviceGVK)
 	order.SetName("custom")
@@ -69,7 +69,7 @@ func TestLocalAPIServerAdmission(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKey{Name: name}, live); err != nil {
 			return nil, false, err
 		}
-		if cluster != "account" || live.GetUID() != uid {
+		if cluster != "workspace" || live.GetUID() != uid {
 			return nil, false, fmt.Errorf("wrong identity")
 		}
 		return c, false, nil
@@ -80,7 +80,7 @@ func TestLocalAPIServerAdmission(t *testing.T) {
 	failure := admission.Fail
 	effects := admission.SideEffectClassNone
 	timeout := int32(10)
-	webhook := &admission.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "ocp-test"}, Webhooks: []admission.ValidatingWebhook{{Name: "disconnect.ocp.test", ClientConfig: admission.WebhookClientConfig{URL: &server.URL, CABundle: ca}, FailurePolicy: &failure, SideEffects: &effects, TimeoutSeconds: &timeout, AdmissionReviewVersions: []string{"v1"}, MatchConditions: []admission.MatchCondition{{Name: "ocp-only", Expression: `request.name == "ocp"`}}, Rules: []admission.RuleWithOperations{{Operations: []admission.OperationType{admission.Delete}, Rule: admission.Rule{APIGroups: []string{"apis.kcp.io"}, APIVersions: []string{"*"}, Resources: []string{"apibindings"}}}}}}}
+	webhook := &admission.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "services-test"}, Webhooks: []admission.ValidatingWebhook{{Name: "disconnect.openmcp.test", ClientConfig: admission.WebhookClientConfig{URL: &server.URL, CABundle: ca}, FailurePolicy: &failure, SideEffects: &effects, TimeoutSeconds: &timeout, AdmissionReviewVersions: []string{"v1"}, MatchConditions: []admission.MatchCondition{{Name: "protected-binding", Expression: `request.name == "services"`}}, Rules: []admission.RuleWithOperations{{Operations: []admission.OperationType{admission.Delete}, Rule: admission.Rule{APIGroups: []string{"apis.kcp.io"}, APIVersions: []string{"*"}, Resources: []string{"apibindings"}}}}}}}
 	if err := c.Create(ctx, webhook); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +112,6 @@ func TestLocalAPIServerAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := c.Delete(ctx, binding); err != nil {
-		t.Fatalf("empty account could not disconnect: %v", err)
+		t.Fatalf("empty workspace could not disconnect: %v", err)
 	}
 }

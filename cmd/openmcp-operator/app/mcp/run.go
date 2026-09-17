@@ -63,19 +63,16 @@ func NewRunCommand(po *options.PersistentOptions) *cobra.Command {
 func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.KCPEndpointSlice, "kcp-endpoint-slice", "", "Multicluster (kcp) mode: name of the APIExportEndpointSlice serving the tenant workspaces. Empty disables the mode.")
 	cmd.Flags().StringVar(&o.KCPKubeconfig, "kcp-kubeconfig", "", "Multicluster (kcp) mode: kubeconfig path for the workspace holding the APIExportEndpointSlice.")
-	cmd.Flags().StringVar(&o.KCPFluxProviderImage, "kcp-flux-provider-image", "", "Multicluster (kcp) mode: upstream Flux service-provider image. Empty disables its per-account deployment.")
-	cmd.Flags().StringVar(&o.KCPExternalSecretsProviderImage, "kcp-external-secrets-provider-image", "", "Multicluster (kcp) mode: upstream External Secrets service-provider image. Empty disables its per-account deployment.")
-	cmd.Flags().StringVar(&o.KCPFluxProviderName, "kcp-flux-provider-name", "ocp-kcp-hosted-flux", "Multicluster (kcp) mode: shared Flux ProviderConfig name.")
-	cmd.Flags().StringVar(&o.KCPExternalSecretsProviderName, "kcp-external-secrets-provider-name", "ocp-kcp-hosted-external-secrets", "Multicluster (kcp) mode: shared External Secrets ProviderConfig name.")
-	cmd.Flags().DurationVar(&o.KCPAccountReconcileInterval, "kcp-account-reconcile-interval", 5*time.Second, "Multicluster (kcp) mode: interval for account runtime reconciliation.")
-	cmd.Flags().DurationVar(&o.KCPAccountCleanupDelay, "kcp-account-cleanup-delay", time.Minute, "Multicluster (kcp) mode: delay before platform runtime removal after disengagement.")
-	cmd.Flags().DurationVar(&o.KCPAccountTokenLifetime, "kcp-account-token-lifetime", time.Hour, "Multicluster (kcp) mode: lifetime of account-only provider credentials.")
+	cmd.Flags().StringVar(&o.KCPServiceProviders, "kcp-service-providers", "", "Multicluster (kcp) mode: path to the JSON service-provider configuration. Empty deploys no service providers.")
+	cmd.Flags().DurationVar(&o.KCPWorkspaceReconcileInterval, "kcp-workspace-reconcile-interval", 5*time.Second, "Multicluster (kcp) mode: interval for workspace runtime reconciliation.")
+	cmd.Flags().DurationVar(&o.KCPWorkspaceCleanupDelay, "kcp-workspace-cleanup-delay", time.Minute, "Multicluster (kcp) mode: delay before platform runtime removal after disengagement.")
+	cmd.Flags().DurationVar(&o.KCPWorkspaceTokenLifetime, "kcp-workspace-token-lifetime", time.Hour, "Multicluster (kcp) mode: lifetime of workspace-only provider credentials.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardAddress, "kcp-disconnect-guard-address", "", "Multicluster (kcp) mode: HTTPS listen address for the APIBinding deletion guard.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardURL, "kcp-disconnect-guard-url", "", "Multicluster (kcp) mode: public HTTPS URL of the APIBinding deletion guard.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardCert, "kcp-disconnect-guard-cert", "", "Multicluster (kcp) mode: guard TLS certificate file.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardKey, "kcp-disconnect-guard-key", "", "Multicluster (kcp) mode: guard TLS private key file.")
 	cmd.Flags().StringVar(&o.KCPDisconnectGuardCA, "kcp-disconnect-guard-ca", "", "Multicluster (kcp) mode: guard CA bundle file.")
-	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "ocp", "Multicluster (kcp) mode: APIBinding protected by the deletion guard.")
+	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "", "Multicluster (kcp) mode: APIBinding that owns each workspace runtime.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	cmd.Flags().StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -92,19 +89,16 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 }
 
 type RawRunOptions struct {
-	KCPFluxProviderImage            string        `json:"kcp-flux-provider-image"`
-	KCPExternalSecretsProviderImage string        `json:"kcp-external-secrets-provider-image"`
-	KCPFluxProviderName             string        `json:"kcp-flux-provider-name"`
-	KCPExternalSecretsProviderName  string        `json:"kcp-external-secrets-provider-name"`
-	KCPAccountReconcileInterval     time.Duration `json:"kcp-account-reconcile-interval"`
-	KCPAccountCleanupDelay          time.Duration `json:"kcp-account-cleanup-delay"`
-	KCPAccountTokenLifetime         time.Duration `json:"kcp-account-token-lifetime"`
-	KCPDisconnectGuardAddress       string        `json:"kcp-disconnect-guard-address"`
-	KCPDisconnectGuardURL           string        `json:"kcp-disconnect-guard-url"`
-	KCPDisconnectGuardCert          string        `json:"kcp-disconnect-guard-cert"`
-	KCPDisconnectGuardKey           string        `json:"kcp-disconnect-guard-key"`
-	KCPDisconnectGuardCA            string        `json:"kcp-disconnect-guard-ca"`
-	KCPBindingName                  string        `json:"kcp-binding-name"`
+	KCPServiceProviders           string        `json:"kcp-service-providers"`
+	KCPWorkspaceReconcileInterval time.Duration `json:"kcp-workspace-reconcile-interval"`
+	KCPWorkspaceCleanupDelay      time.Duration `json:"kcp-workspace-cleanup-delay"`
+	KCPWorkspaceTokenLifetime     time.Duration `json:"kcp-workspace-token-lifetime"`
+	KCPDisconnectGuardAddress     string        `json:"kcp-disconnect-guard-address"`
+	KCPDisconnectGuardURL         string        `json:"kcp-disconnect-guard-url"`
+	KCPDisconnectGuardCert        string        `json:"kcp-disconnect-guard-cert"`
+	KCPDisconnectGuardKey         string        `json:"kcp-disconnect-guard-key"`
+	KCPDisconnectGuardCA          string        `json:"kcp-disconnect-guard-ca"`
+	KCPBindingName                string        `json:"kcp-binding-name"`
 	// kubebuilder default flags
 	MetricsAddr          string `json:"metrics-bind-address"`
 	MetricsCertPath      string `json:"metrics-cert-path"`
@@ -133,12 +127,13 @@ type RunOptions struct {
 	RawRunOptions
 
 	// fields filled in Complete()
-	ProviderGVKList      []schema.GroupVersionKind
-	TLSOpts              []func(*tls.Config)
-	WebhookTLSOpts       []func(*tls.Config)
-	MetricsServerOptions metricsserver.Options
-	MetricsCertWatcher   *certwatcher.CertWatcher
-	WebhookCertWatcher   *certwatcher.CertWatcher
+	ProviderGVKList       []schema.GroupVersionKind
+	KCPWorkspaceProviders []workspaceProvider
+	TLSOpts               []func(*tls.Config)
+	WebhookTLSOpts        []func(*tls.Config)
+	MetricsServerOptions  metricsserver.Options
+	MetricsCertWatcher    *certwatcher.CertWatcher
+	WebhookCertWatcher    *certwatcher.CertWatcher
 }
 
 func (o *RunOptions) PrintRaw(cmd *cobra.Command) {
@@ -168,15 +163,23 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 		if o.KCPKubeconfig == "" {
 			return fmt.Errorf("kcp-kubeconfig must not be empty in multicluster mode")
 		}
-		if o.KCPAccountReconcileInterval <= 0 {
-			return fmt.Errorf("kcp-account-reconcile-interval must be positive")
+		if o.KCPBindingName == "" {
+			return fmt.Errorf("kcp-binding-name must not be empty in multicluster mode")
 		}
-		if o.KCPAccountCleanupDelay < 0 {
-			return fmt.Errorf("kcp-account-cleanup-delay must not be negative")
+		if o.KCPWorkspaceReconcileInterval <= 0 {
+			return fmt.Errorf("kcp-workspace-reconcile-interval must be positive")
 		}
-		if o.KCPAccountTokenLifetime < 10*time.Minute || o.KCPAccountTokenLifetime > 24*time.Hour {
-			return fmt.Errorf("kcp-account-token-lifetime must be between 10m and 24h")
+		if o.KCPWorkspaceCleanupDelay < 0 {
+			return fmt.Errorf("kcp-workspace-cleanup-delay must not be negative")
 		}
+		if o.KCPWorkspaceTokenLifetime < 10*time.Minute || o.KCPWorkspaceTokenLifetime > 24*time.Hour {
+			return fmt.Errorf("kcp-workspace-token-lifetime must be between 10m and 24h")
+		}
+		providers, err := loadWorkspaceProviders(o.KCPServiceProviders)
+		if err != nil {
+			return err
+		}
+		o.KCPWorkspaceProviders = providers
 		guard := []string{o.KCPDisconnectGuardAddress, o.KCPDisconnectGuardURL, o.KCPDisconnectGuardCert, o.KCPDisconnectGuardKey}
 		configured := 0
 		for _, value := range guard {
@@ -187,8 +190,8 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 		if configured != 0 && configured != len(guard) {
 			return fmt.Errorf("the disconnect guard address, URL, certificate, and key must be set together")
 		}
-		if configured > 0 && o.KCPBindingName == "" {
-			return fmt.Errorf("kcp-binding-name must not be empty")
+		if configured > 0 && len(o.KCPWorkspaceProviders) == 0 {
+			return fmt.Errorf("kcp-service-providers must configure at least one service provider when the disconnect guard is enabled")
 		}
 	}
 	setupLog = o.Log.WithName("setup")

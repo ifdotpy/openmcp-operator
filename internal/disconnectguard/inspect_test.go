@@ -14,17 +14,17 @@ import (
 )
 
 func TestInspectAllNamespacesAndWorkspaceDeletion(t *testing.T) {
-	gvk := schema.GroupVersionKind{Group: "flux.services.open-control-plane.io", Version: "v1alpha1", Kind: "Flux"}
+	gvk := schema.GroupVersionKind{Group: "services.example.io", Version: "v1alpha1", Kind: "Example"}
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("FluxList"), &unstructured.UnstructuredList{})
+	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("ExampleList"), &unstructured.UnstructuredList{})
 	for _, tc := range []struct {
 		name                                 string
 		order, deleting, resolveError, allow bool
 	}{
 		{name: "empty", allow: true},
 		{name: "custom namespace", order: true},
-		{name: "PM account deletion", order: true, deleting: true, allow: true},
+		{name: "workspace deletion", order: true, deleting: true, allow: true},
 		{name: "unknown binding", resolveError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,7 +43,7 @@ func TestInspectAllNamespacesAndWorkspaceDeletion(t *testing.T) {
 				}
 				return c, tc.deleting, nil
 			}}
-			if err := i.Check(context.Background(), "account", "ocp", "uid"); (err == nil) != tc.allow {
+			if err := i.Check(context.Background(), "workspace", "services", "uid"); (err == nil) != tc.allow {
 				t.Fatalf("unexpected result %v", err)
 			}
 		})

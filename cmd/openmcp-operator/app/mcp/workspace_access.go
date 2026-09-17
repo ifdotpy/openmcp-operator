@@ -26,13 +26,13 @@ import (
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
 )
 
-const accountAccessOwnerLabel = "account.openmcp.cloud/access-uid"
+const workspaceAccessOwnerLabel = "workspace.openmcp.cloud/access-uid"
 
-func accountAccessNamespace(ar *clustersv1alpha1.AccessRequest) string {
+func workspaceAccessNamespace(ar *clustersv1alpha1.AccessRequest) string {
 	return "openmcp-access-" + string(ar.UID)
 }
 
-func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace string, accountClient client.Client, accountClientset kubernetes.Interface, accountConfig *rest.Config, bindingOwner metav1.OwnerReference) error {
+func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespace string, workspaceClient client.Client, workspaceClientset kubernetes.Interface, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference) error {
 	platform := r.platform.Client()
 	list := &clustersv1alpha1.AccessRequestList{}
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -41,11 +41,11 @@ func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace 
 	for i := range list.Items {
 		ar := &list.Items[i]
 		if !ar.DeletionTimestamp.IsZero() {
-			done, err := revokeAccountAccess(ctx, accountClient, ar)
+			done, err := revokeWorkspaceAccess(ctx, workspaceClient, ar)
 			if err != nil {
 				return err
 			}
-			if done && controllerutil.RemoveFinalizer(ar, accountAccessFinalizer) {
+			if done && controllerutil.RemoveFinalizer(ar, workspaceAccessFinalizer) {
 				if err := platform.Update(ctx, ar); err != nil && !apierrors.IsNotFound(err) {
 					return err
 				}
@@ -58,7 +58,7 @@ func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace 
 		if ar.Spec.Token == nil {
 			continue
 		}
-		if controllerutil.AddFinalizer(ar, accountAccessFinalizer) {
+		if controllerutil.AddFinalizer(ar, workspaceAccessFinalizer) {
 			if err := platform.Update(ctx, ar); err != nil {
 				return err
 			}
@@ -70,7 +70,7 @@ func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace 
 		if !resolved {
 			continue
 		}
-		if err := ensureAccountAccess(ctx, accountClient, ar, bindingOwner); err != nil {
+		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, bindingOwner); err != nil {
 			return err
 		}
 		secretName := ar.Name + "-kubeconfig"
@@ -85,9 +85,9 @@ func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace 
 			rotate = parseErr != nil || time.Until(expires) < r.tokenLifetime/3
 		}
 		if rotate {
-			kubeconfig, expires, err := mintAccountCredential(ctx, accountClientset, accountConfig, ar, r.tokenLifetime)
+			kubeconfig, expires, err := mintWorkspaceCredential(ctx, workspaceClientset, workspaceConfig, ar, r.tokenLifetime)
 			if err != nil {
-				return fmt.Errorf("mint account credential for %s: %w", ar.Name, err)
+				return fmt.Errorf("mint workspace credential for %s: %w", ar.Name, err)
 			}
 			secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace}}
 			if _, err := controllerutil.CreateOrUpdate(ctx, platform, secret, func() error {
@@ -114,8 +114,8 @@ func (r *accountRuntime) reconcileAccessRequests(ctx context.Context, namespace 
 	return nil
 }
 
-func (r *accountRuntime) resolveAccessRequest(ctx context.Context, ar *clustersv1alpha1.AccessRequest, namespace string) (bool, error) {
-	if ar.Spec.ClusterRef != nil && ar.Labels[clustersv1alpha1.ProviderLabel] == accountProviderName {
+func (r *workspaceRuntime) resolveAccessRequest(ctx context.Context, ar *clustersv1alpha1.AccessRequest, namespace string) (bool, error) {
+	if ar.Spec.ClusterRef != nil && ar.Labels[clustersv1alpha1.ProviderLabel] == workspaceProviderName {
 		return true, nil
 	}
 	old := ar.DeepCopy()
@@ -136,15 +136,15 @@ func (r *accountRuntime) resolveAccessRequest(ctx context.Context, ar *clustersv
 	if ar.Labels == nil {
 		ar.Labels = map[string]string{}
 	}
-	ar.Labels[clustersv1alpha1.ProviderLabel] = accountProviderName
-	ar.Labels[clustersv1alpha1.ProfileLabel] = accountClusterProfile
+	ar.Labels[clustersv1alpha1.ProviderLabel] = workspaceProviderName
+	ar.Labels[clustersv1alpha1.ProfileLabel] = workspaceClusterProfile
 	if ar.Spec.ClusterRef.Namespace == "" {
 		ar.Spec.ClusterRef.Namespace = namespace
 	}
 	return true, r.platform.Client().Patch(ctx, ar, client.MergeFrom(old))
 }
 
-func accountGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, error) {
+func workspaceGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, error) {
 	if ar.UID == "" || ar.Spec.Token == nil {
 		return nil, fmt.Errorf("token AccessRequest UID is required")
 	}
@@ -155,10 +155,10 @@ func accountGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, e
 	digest := sha256.Sum256(data)
 	prefix := "openmcp-" + string(ar.UID) + "-" + hex.EncodeToString(digest[:4])
 	owner := string(ar.UID)
-	subjects := []rbacv1.Subject{{Kind: serviceAccountKind, Name: controllerName, Namespace: accountAccessNamespace(ar)}}
+	subjects := []rbacv1.Subject{{Kind: serviceAccountKind, Name: controllerName, Namespace: workspaceAccessNamespace(ar)}}
 	var out []client.Object
 	bind := func(name, namespace string, ref rbacv1.RoleRef) {
-		metadata := metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{accountAccessOwnerLabel: owner}}
+		metadata := metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{workspaceAccessOwnerLabel: owner}}
 		if namespace == "" {
 			out = append(out, &rbacv1.ClusterRoleBinding{ObjectMeta: metadata, RoleRef: ref, Subjects: subjects})
 		} else {
@@ -173,9 +173,9 @@ func accountGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, e
 		kind := roleKind
 		if permission.Namespace == "" {
 			kind = clusterRoleKind
-			out = append(out, &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{accountAccessOwnerLabel: owner}}, Rules: permission.Rules})
+			out = append(out, &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{workspaceAccessOwnerLabel: owner}}, Rules: permission.Rules})
 		} else {
-			out = append(out, &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: permission.Namespace, Labels: map[string]string{accountAccessOwnerLabel: owner}}, Rules: permission.Rules})
+			out = append(out, &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: permission.Namespace, Labels: map[string]string{workspaceAccessOwnerLabel: owner}}, Rules: permission.Rules})
 		}
 		bind(fmt.Sprintf("%s-p%d", prefix, i), permission.Namespace, rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: name})
 	}
@@ -188,15 +188,15 @@ func accountGrantObjects(ar *clustersv1alpha1.AccessRequest) ([]client.Object, e
 	return out, nil
 }
 
-func accountObjectID(obj client.Object) string {
+func workspaceObjectID(obj client.Object) string {
 	return fmt.Sprintf("%T/%s/%s", obj, obj.GetNamespace(), obj.GetName())
 }
 
-func accountOwnedUpsert(ctx context.Context, c client.Client, object client.Object, owner string) error {
+func workspaceOwnedUpsert(ctx context.Context, c client.Client, object client.Object, owner string) error {
 	desired := object.DeepCopyObject().(client.Object)
 	_, err := controllerutil.CreateOrUpdate(ctx, c, object, func() error {
-		if object.GetUID() != "" && object.GetLabels()[accountAccessOwnerLabel] != owner {
-			return fmt.Errorf("refusing to adopt foreign %s", accountObjectID(object))
+		if object.GetUID() != "" && object.GetLabels()[workspaceAccessOwnerLabel] != owner {
+			return fmt.Errorf("refusing to adopt foreign %s", workspaceObjectID(object))
 		}
 		object.SetLabels(desired.GetLabels())
 		object.SetOwnerReferences(desired.GetOwnerReferences())
@@ -217,9 +217,9 @@ func accountOwnedUpsert(ctx context.Context, c client.Client, object client.Obje
 	return err
 }
 
-func pruneAccountGrants(ctx context.Context, c client.Client, owner string, keep map[string]bool) error {
+func pruneWorkspaceGrants(ctx context.Context, c client.Client, owner string, keep map[string]bool) error {
 	for _, list := range []client.ObjectList{&rbacv1.RoleBindingList{}, &rbacv1.ClusterRoleBindingList{}, &rbacv1.RoleList{}, &rbacv1.ClusterRoleList{}} {
-		if err := c.List(ctx, list, client.MatchingLabels{accountAccessOwnerLabel: owner}); err != nil {
+		if err := c.List(ctx, list, client.MatchingLabels{workspaceAccessOwnerLabel: owner}); err != nil {
 			return err
 		}
 		items, err := meta.ExtractList(list)
@@ -228,7 +228,7 @@ func pruneAccountGrants(ctx context.Context, c client.Client, owner string, keep
 		}
 		for _, item := range items {
 			object := item.(client.Object)
-			if keep[accountObjectID(object)] {
+			if keep[workspaceObjectID(object)] {
 				continue
 			}
 			if err := c.Delete(ctx, object); client.IgnoreNotFound(err) != nil {
@@ -239,11 +239,11 @@ func pruneAccountGrants(ctx context.Context, c client.Client, owner string, keep
 	return nil
 }
 
-func ensureAccountAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, bindingOwner metav1.OwnerReference) error {
-	objects, err := accountGrantObjects(ar)
+func ensureWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest, bindingOwner metav1.OwnerReference) error {
+	objects, err := workspaceGrantObjects(ar)
 	if err != nil {
 		if ar.UID != "" {
-			_ = pruneAccountGrants(ctx, c, string(ar.UID), nil)
+			_ = pruneWorkspaceGrants(ctx, c, string(ar.UID), nil)
 		}
 		return err
 	}
@@ -251,17 +251,17 @@ func ensureAccountAccess(ctx context.Context, c client.Client, ar *clustersv1alp
 	keep := map[string]bool{}
 	for _, object := range objects {
 		object.SetOwnerReferences([]metav1.OwnerReference{bindingOwner})
-		keep[accountObjectID(object)] = true
+		keep[workspaceObjectID(object)] = true
 	}
-	if err := pruneAccountGrants(ctx, c, owner, keep); err != nil {
+	if err := pruneWorkspaceGrants(ctx, c, owner, keep); err != nil {
 		return err
 	}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: accountAccessNamespace(ar), Labels: map[string]string{accountAccessOwnerLabel: owner}, OwnerReferences: []metav1.OwnerReference{bindingOwner}}}
-	if err := accountOwnedUpsert(ctx, c, ns, owner); err != nil {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceAccessNamespace(ar), Labels: map[string]string{workspaceAccessOwnerLabel: owner}, OwnerReferences: []metav1.OwnerReference{bindingOwner}}}
+	if err := workspaceOwnedUpsert(ctx, c, ns, owner); err != nil {
 		return err
 	}
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: controllerName, Namespace: ns.Name, Labels: map[string]string{accountAccessOwnerLabel: owner}, OwnerReferences: []metav1.OwnerReference{bindingOwner}}}
-	if err := accountOwnedUpsert(ctx, c, sa, owner); err != nil {
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: controllerName, Namespace: ns.Name, Labels: map[string]string{workspaceAccessOwnerLabel: owner}, OwnerReferences: []metav1.OwnerReference{bindingOwner}}}
+	if err := workspaceOwnedUpsert(ctx, c, sa, owner); err != nil {
 		return err
 	}
 	for _, permission := range ar.Spec.Token.Permissions {
@@ -278,28 +278,28 @@ func ensureAccountAccess(ctx context.Context, c client.Client, ar *clustersv1alp
 		}
 	}
 	for _, object := range objects {
-		if err := accountOwnedUpsert(ctx, c, object, owner); err != nil {
+		if err := workspaceOwnedUpsert(ctx, c, object, owner); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func revokeAccountAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {
+func revokeWorkspaceAccess(ctx context.Context, c client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {
 	owner := string(ar.UID)
-	if err := pruneAccountGrants(ctx, c, owner, nil); err != nil {
+	if err := pruneWorkspaceGrants(ctx, c, owner, nil); err != nil {
 		return false, err
 	}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: accountAccessNamespace(ar)}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceAccessNamespace(ar)}}
 	if err := c.Delete(ctx, ns); client.IgnoreNotFound(err) != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func mintAccountCredential(ctx context.Context, c kubernetes.Interface, cfg *rest.Config, ar *clustersv1alpha1.AccessRequest, lifetime time.Duration) ([]byte, time.Time, error) {
+func mintWorkspaceCredential(ctx context.Context, c kubernetes.Interface, cfg *rest.Config, ar *clustersv1alpha1.AccessRequest, lifetime time.Duration) ([]byte, time.Time, error) {
 	seconds := int64(lifetime.Seconds())
-	token, err := c.CoreV1().ServiceAccounts(accountAccessNamespace(ar)).CreateToken(ctx, controllerName, &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
+	token, err := c.CoreV1().ServiceAccounts(workspaceAccessNamespace(ar)).CreateToken(ctx, controllerName, &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{ExpirationSeconds: &seconds}}, metav1.CreateOptions{})
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -307,53 +307,53 @@ func mintAccountCredential(ctx context.Context, c kubernetes.Interface, cfg *res
 		return nil, time.Time{}, fmt.Errorf("token request returned no usable credential")
 	}
 	config, err := clientcmd.Write(clientcmdapi.Config{
-		Clusters:       map[string]*clientcmdapi.Cluster{accountClusterName: {Server: cfg.Host, CertificateAuthorityData: cfg.CAData}},
+		Clusters:       map[string]*clientcmdapi.Cluster{workspaceClusterName: {Server: cfg.Host, CertificateAuthorityData: cfg.CAData}},
 		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"provider": {Token: token.Status.Token}},
-		Contexts:       map[string]*clientcmdapi.Context{accountClusterName: {Cluster: accountClusterName, AuthInfo: "provider"}},
-		CurrentContext: accountClusterName,
+		Contexts:       map[string]*clientcmdapi.Context{workspaceClusterName: {Cluster: workspaceClusterName, AuthInfo: "provider"}},
+		CurrentContext: workspaceClusterName,
 	})
 	return config, token.Status.ExpirationTimestamp.Time, err
 }
 
-func (r *accountRuntime) cleanupAccountAccess(name multicluster.ClusterName, c client.Client, log interface{ Error(error, string, ...any) }) {
+func (r *workspaceRuntime) cleanupWorkspaceAccess(name multicluster.ClusterName, c client.Client, log interface{ Error(error, string, ...any) }) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, list := range []client.ObjectList{&rbacv1.RoleBindingList{}, &rbacv1.ClusterRoleBindingList{}, &rbacv1.RoleList{}, &rbacv1.ClusterRoleList{}} {
 		if err := c.List(ctx, list); err != nil {
-			log.Error(err, "unable to list account access grants")
+			log.Error(err, "unable to list workspace access grants")
 			continue
 		}
 		items, err := meta.ExtractList(list)
 		if err != nil {
-			log.Error(err, "unable to read account access grants")
+			log.Error(err, "unable to read workspace access grants")
 			continue
 		}
 		for _, item := range items {
 			obj := item.(client.Object)
-			if _, ok := obj.GetLabels()[accountAccessOwnerLabel]; !ok {
+			if _, ok := obj.GetLabels()[workspaceAccessOwnerLabel]; !ok {
 				continue
 			}
 			if err := c.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-				log.Error(err, "unable to remove account access grant")
+				log.Error(err, "unable to remove workspace access grant")
 			}
 		}
 	}
 	namespaces := &corev1.NamespaceList{}
 	if err := c.List(ctx, namespaces); err != nil {
-		log.Error(err, "unable to list account namespaces")
+		log.Error(err, "unable to list workspace namespaces")
 		return
 	}
 	for i := range namespaces.Items {
 		ns := &namespaces.Items[i]
-		if _, ok := ns.Labels[accountAccessOwnerLabel]; !ok {
+		if _, ok := ns.Labels[workspaceAccessOwnerLabel]; !ok {
 			continue
 		}
 		if err := c.Delete(ctx, ns); client.IgnoreNotFound(err) != nil {
-			log.Error(err, "unable to remove account access namespace")
+			log.Error(err, "unable to remove workspace access namespace")
 		}
 	}
-	accountNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: accountControlPlaneNamespace(name)}}
-	if err := c.Delete(ctx, accountNamespace); client.IgnoreNotFound(err) != nil {
-		log.Error(err, "unable to remove account control-plane namespace")
+	workspaceNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: workspaceControlPlaneNamespace(name)}}
+	if err := c.Delete(ctx, workspaceNamespace); client.IgnoreNotFound(err) != nil {
+		log.Error(err, "unable to remove workspace control-plane namespace")
 	}
 }

@@ -19,13 +19,13 @@ import (
 	"github.com/openmcp-project/openmcp-operator/internal/disconnectguard"
 )
 
-type accountDisconnectGuard struct {
+type workspaceDisconnectGuard struct {
 	bindingName string
 	url         string
 	caBundle    []byte
 }
 
-func (r *accountRuntime) ensureDisconnectWebhook(ctx context.Context, name multicluster.ClusterName, c client.Client) error {
+func (r *workspaceRuntime) ensureDisconnectWebhook(ctx context.Context, name multicluster.ClusterName, c client.Client) error {
 	guard := r.disconnectGuard
 	parsed, err := url.Parse(guard.url)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -39,16 +39,16 @@ func (r *accountRuntime) ensureDisconnectWebhook(ctx context.Context, name multi
 		return fmt.Errorf("protected APIBinding has no UID")
 	}
 	failure, effects, timeout := admissionv1.Fail, admissionv1.SideEffectClassNone, int32(10)
-	webhook := &admissionv1.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "ocp-disconnect-" + string(binding.UID)}}
+	webhook := &admissionv1.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "openmcp-disconnect-" + string(binding.UID)}}
 	_, err = controllerutil.CreateOrUpdate(ctx, c, webhook, func() error {
-		webhook.Labels = map[string]string{accountRuntimeLabel: accountControlPlaneNamespace(name)}
+		webhook.Labels = map[string]string{workspaceRuntimeLabel: workspaceControlPlaneNamespace(name)}
 		webhook.OwnerReferences = []metav1.OwnerReference{{APIVersion: kcpapisv1alpha1.SchemeGroupVersion.String(), Kind: "APIBinding", Name: binding.Name, UID: binding.UID}}
 		webhook.Webhooks = []admissionv1.ValidatingWebhook{{
-			Name:          "disconnect.ocp.services.open-control-plane.io",
+			Name:          "disconnect.openmcp.cloud",
 			ClientConfig:  admissionv1.WebhookClientConfig{URL: &guard.url, CABundle: guard.caBundle},
 			FailurePolicy: &failure, SideEffects: &effects, TimeoutSeconds: &timeout,
 			AdmissionReviewVersions: []string{"v1"},
-			MatchConditions:         []admissionv1.MatchCondition{{Name: "ocp-only", Expression: fmt.Sprintf("request.name == %q", binding.Name)}},
+			MatchConditions:         []admissionv1.MatchCondition{{Name: "protected-binding", Expression: fmt.Sprintf("request.name == %q", binding.Name)}},
 			Rules:                   []admissionv1.RuleWithOperations{{Operations: []admissionv1.OperationType{admissionv1.Delete}, Rule: admissionv1.Rule{APIGroups: []string{"apis.kcp.io"}, APIVersions: []string{"*"}, Resources: []string{"apibindings"}}}},
 		}}
 		return nil
@@ -56,24 +56,25 @@ func (r *accountRuntime) ensureDisconnectWebhook(ctx context.Context, name multi
 	return err
 }
 
-func (r *accountRuntime) disconnectInspector() disconnectguard.Inspector {
+func (r *workspaceRuntime) disconnectInspector() disconnectguard.Inspector {
+	services := make([]schema.GroupVersionKind, 0, len(r.providers))
+	for _, provider := range r.providers {
+		services = append(services, schema.GroupVersionKind(provider.Resource))
+	}
 	return disconnectguard.Inspector{
-		Resolve: r.resolveDisconnectAccount,
-		Services: []schema.GroupVersionKind{
-			{Group: fluxAPIGroup, Version: serviceAPIVersion, Kind: "Flux"},
-			{Group: externalSecretsAPIGroup, Version: serviceAPIVersion, Kind: "ExternalSecretsOperator"},
-		},
+		Resolve:  r.resolveDisconnectWorkspace,
+		Services: services,
 	}
 }
 
-func (r *accountRuntime) resolveDisconnectAccount(ctx context.Context, clusterName, bindingName string, uid types.UID) (client.Client, bool, error) {
+func (r *workspaceRuntime) resolveDisconnectWorkspace(ctx context.Context, clusterName, bindingName string, uid types.UID) (client.Client, bool, error) {
 	r.mu.Lock()
-	account, ok := r.accounts[multicluster.ClusterName(clusterName)]
+	workspace, ok := r.workspaces[multicluster.ClusterName(clusterName)]
 	r.mu.Unlock()
 	if !ok {
-		return nil, false, fmt.Errorf("account is not engaged")
+		return nil, false, fmt.Errorf("workspace is not engaged")
 	}
-	c := account
+	c := workspace
 	binding := &kcpapisv1alpha1.APIBinding{}
 	if err := c.Get(ctx, client.ObjectKey{Name: bindingName}, binding); err != nil {
 		return nil, false, err
