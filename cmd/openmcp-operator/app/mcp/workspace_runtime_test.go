@@ -402,6 +402,18 @@ func TestWorkspaceRuntimeCancelsStaleCleanupAndRemovesDisengagedRuntime(t *testi
 	if err := bootstrap.ensureDefault(ctx, workspace, workspaceNamespace, testBindingOwner()); err != nil {
 		t.Fatal(err)
 	}
+	controlPlaneKey := client.ObjectKey{Name: defaultControlPlaneName, Namespace: workspaceNamespace}
+	controlPlane := &corev2alpha1.ControlPlane{}
+	if err := workspace.Get(ctx, controlPlaneKey, controlPlane); err != nil {
+		t.Fatal(err)
+	}
+	controlPlane.Finalizers = []string{corev2alpha1.MCPFinalizer, corev2alpha1.ClusterRequestFinalizerPrefix + defaultControlPlaneName}
+	if err := workspace.Update(ctx, controlPlane); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Delete(ctx, controlPlane); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.ensurePlatformRuntime(ctx, workspaceName, platformNamespace, "https://kcp.example/clusters/root:tenants:demo"); err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +454,8 @@ func TestWorkspaceRuntimeCancelsStaleCleanupAndRemovesDisengagedRuntime(t *testi
 	for time.Now().Before(deadline) {
 		workspaceErr := workspace.Get(ctx, client.ObjectKey{Name: workspaceNamespace}, &corev1.Namespace{})
 		platformErr := platform.Get(ctx, client.ObjectKey{Name: platformNamespace}, &corev1.Namespace{})
-		if apierrors.IsNotFound(workspaceErr) && apierrors.IsNotFound(platformErr) {
+		controlPlaneErr := workspace.Get(ctx, controlPlaneKey, &corev2alpha1.ControlPlane{})
+		if apierrors.IsNotFound(workspaceErr) && apierrors.IsNotFound(platformErr) && apierrors.IsNotFound(controlPlaneErr) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

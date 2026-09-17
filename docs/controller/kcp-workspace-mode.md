@@ -8,6 +8,8 @@ The operator uses no Platform Mesh API. It uses these KCP signals:
 - The `APIBinding` for the endpoint slice export owns all workspace resources.
 - APIExport disengagement removes the workspace runtime after the cleanup delay.
 
+During workspace deletion, the runtime removes its platform resources before it finalizes the workspace `ControlPlane`. This order lets KCP delete the workspace without orphaned finalizers.
+
 The operator creates `ControlPlane/default` in the engaged workspace. It registers the same workspace for onboarding and MCP use. It does not create a nested Kubernetes cluster.
 
 Enable the mode with these flags:
