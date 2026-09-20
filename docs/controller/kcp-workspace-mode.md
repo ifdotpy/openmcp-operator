@@ -53,3 +53,10 @@ The operator resolves only onboarding and MCP requests to the workspace API.
 Workload requests remain the responsibility of the normal cluster scheduler.
 Provider configuration is trusted administrator input; its RBAC rules must match
 what the configured provider needs on the platform cluster.
+
+An optional HTTPS admission guard prevents deleting the APIBinding while configured
+service objects still exist. Enable it with `--kcp-disconnect-guard-address`,
+`--kcp-disconnect-guard-url`, `--kcp-disconnect-guard-cert`, and
+`--kcp-disconnect-guard-key`. Use `--kcp-disconnect-guard-ca` for a private CA.
+The guard inspects all namespaces and fails closed when inspection fails. Deleting
+the entire workspace remains permitted so its normal cleanup can proceed.

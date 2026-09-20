@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,6 +29,7 @@ import (
 	"github.com/openmcp-project/openmcp-operator/api/install"
 	"github.com/openmcp-project/openmcp-operator/internal/config"
 	"github.com/openmcp-project/openmcp-operator/internal/controllers/controlplane"
+	"github.com/openmcp-project/openmcp-operator/internal/disconnectguard"
 )
 
 type workspaceOnboardingCluster struct {
@@ -171,6 +173,23 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 	}
 	if err := runtime.reconcileServiceProviders(ctx); err != nil {
 		return err
+	}
+	if o.KCPDisconnectGuardAddress != "" {
+		var ca []byte
+		if o.KCPDisconnectGuardCA != "" {
+			ca, err = os.ReadFile(o.KCPDisconnectGuardCA)
+			if err != nil {
+				return fmt.Errorf("read disconnect guard CA: %w", err)
+			}
+		}
+		runtime.disconnectGuard = &workspaceDisconnectGuard{url: o.KCPDisconnectGuardURL, caBundle: ca}
+		mux := http.NewServeMux()
+		mux.Handle("/disconnect", disconnectguard.Handler{Inspect: runtime.disconnectInspector().Check})
+		if err := mcMgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
+			return disconnectguard.Serve(ctx, o.KCPDisconnectGuardAddress, o.KCPDisconnectGuardCert, o.KCPDisconnectGuardKey, mux)
+		})); err != nil {
+			return fmt.Errorf("unable to add disconnect guard: %w", err)
+		}
 	}
 	if err := mcMgr.Add(runtime); err != nil {
 		return fmt.Errorf("unable to add workspace runtime: %w", err)

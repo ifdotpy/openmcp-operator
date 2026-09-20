@@ -48,6 +48,7 @@ const (
 )
 
 type workspaceRuntime struct {
+	disconnectGuard    *workspaceDisconnectGuard
 	log                logging.Logger
 	platform           *controllerclusters.Cluster
 	environment        string
@@ -145,6 +146,11 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
 	if err := bootstrap.ensureDefault(ctx, workspaceClient, workspaceNamespace, owner); err != nil {
 		return err
+	}
+	if r.disconnectGuard != nil {
+		if err := r.ensureDisconnectWebhook(ctx, name, workspaceClient, binding); err != nil {
+			return err
+		}
 	}
 	runtimeNamespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceNamespace)
 	if err != nil {

@@ -68,6 +68,11 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().DurationVar(&o.KCPWorkspaceTokenLifetime, "kcp-workspace-token-lifetime", time.Hour, "KCP workspace mode: lifetime of account workspace credentials.")
 	cmd.Flags().StringVar(&o.KCPServiceProviders, "kcp-service-providers", "", "KCP workspace mode: JSON configuration of per-workspace service providers.")
 	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "", "KCP workspace mode: preferred APIBinding name. The operator otherwise discovers the binding from the endpoint slice export.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardAddress, "kcp-disconnect-guard-address", "", "KCP workspace mode: HTTPS listen address for the APIBinding deletion guard.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardURL, "kcp-disconnect-guard-url", "", "KCP workspace mode: public HTTPS URL of the APIBinding deletion guard.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardCert, "kcp-disconnect-guard-cert", "", "KCP workspace mode: guard TLS certificate file.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardKey, "kcp-disconnect-guard-key", "", "KCP workspace mode: guard TLS private key file.")
+	cmd.Flags().StringVar(&o.KCPDisconnectGuardCA, "kcp-disconnect-guard-ca", "", "KCP workspace mode: guard CA bundle file.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	cmd.Flags().StringVar(&o.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -84,6 +89,12 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 }
 
 type RawRunOptions struct {
+	KCPDisconnectGuardAddress string `json:"kcp-disconnect-guard-address"`
+	KCPDisconnectGuardURL     string `json:"kcp-disconnect-guard-url"`
+	KCPDisconnectGuardCert    string `json:"kcp-disconnect-guard-cert"`
+	KCPDisconnectGuardKey     string `json:"kcp-disconnect-guard-key"`
+	KCPDisconnectGuardCA      string `json:"kcp-disconnect-guard-ca"`
+
 	KCPWorkspaceReconcileInterval time.Duration `json:"kcp-workspace-reconcile-interval"`
 	KCPWorkspaceCleanupDelay      time.Duration `json:"kcp-workspace-cleanup-delay"`
 	KCPWorkspaceTokenLifetime     time.Duration `json:"kcp-workspace-token-lifetime"`
@@ -158,6 +169,19 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 			return err
 		}
 		o.KCPWorkspaceProviders = providers
+		guard := []string{o.KCPDisconnectGuardAddress, o.KCPDisconnectGuardURL, o.KCPDisconnectGuardCert, o.KCPDisconnectGuardKey}
+		configured := 0
+		for _, value := range guard {
+			if value != "" {
+				configured++
+			}
+		}
+		if configured != 0 && configured != len(guard) {
+			return fmt.Errorf("the disconnect guard address, URL, certificate, and key must be set together")
+		}
+		if configured > 0 && len(o.KCPWorkspaceProviders) == 0 {
+			return fmt.Errorf("kcp-service-providers must configure at least one service provider when the disconnect guard is enabled")
+		}
 		if o.KCPWorkspaceReconcileInterval <= 0 {
 			return fmt.Errorf("kcp-workspace-reconcile-interval must be positive")
 		}
