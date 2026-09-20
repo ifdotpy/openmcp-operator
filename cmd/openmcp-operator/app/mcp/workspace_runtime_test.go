@@ -463,6 +463,72 @@ func TestWorkspaceRuntimeCancelsStaleCleanupAndRemovesDisengagedRuntime(t *testi
 	t.Fatal("disengaged workspace runtime was not removed")
 }
 
+func TestWorkspaceRuntimeCleansDeletingBindingBeforeDisengage(t *testing.T) {
+	ctx := context.Background()
+	r, platform, workspace := testRuntime(t)
+	workspaceName := multicluster.ClusterName("root:tenants:deleting")
+	workspaceNamespace := workspaceControlPlaneNamespace(workspaceName)
+	platformNamespace, err := platformNamespaceForWorkspace(workspaceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binding := &kcpapisv1alpha1.APIBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       r.bindingName,
+			UID:        types.UID("binding-deleting"),
+			Finalizers: []string{"apis.kcp.io/binding"},
+		},
+		Spec: kcpapisv1alpha1.APIBindingSpec{Reference: kcpapisv1alpha1.BindingReference{Export: &r.bindingExport}},
+	}
+	if err := workspace.Create(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
+	if err := bootstrap.ensureDefault(ctx, workspace, workspaceNamespace, workspaceBindingOwnerReference(binding)); err != nil {
+		t.Fatal(err)
+	}
+	controlPlane := &corev2alpha1.ControlPlane{}
+	controlPlaneKey := client.ObjectKey{Name: defaultControlPlaneName, Namespace: workspaceNamespace}
+	if err := workspace.Get(ctx, controlPlaneKey, controlPlane); err != nil {
+		t.Fatal(err)
+	}
+	controlPlane.Finalizers = []string{corev2alpha1.MCPFinalizer, corev2alpha1.ClusterRequestFinalizerPrefix + defaultControlPlaneName}
+	if err := workspace.Update(ctx, controlPlane); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Delete(ctx, controlPlane); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ensurePlatformRuntime(ctx, workspaceName, platformNamespace, "https://kcp.example/clusters/root:tenants:deleting"); err != nil {
+		t.Fatal(err)
+	}
+	request := &clustersv1alpha1.ClusterRequest{ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: platformNamespace, UID: types.UID("request-deleting"), Finalizers: []string{workspaceRequestFinalizer}}}
+	if err := platform.Create(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	access := &clustersv1alpha1.AccessRequest{ObjectMeta: metav1.ObjectMeta{Name: "access", Namespace: platformNamespace, UID: types.UID("access-deleting"), Finalizers: []string{workspaceAccessFinalizer}}}
+	if err := platform.Create(ctx, access); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Delete(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.reconcile(ctx, workspaceName, workspace, &rest.Config{Host: "https://kcp.example/clusters/root:tenants:deleting"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.Get(ctx, client.ObjectKey{Name: platformNamespace}, &corev1.Namespace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("platform runtime still exists: %v", err)
+	}
+	if err := workspace.Get(ctx, controlPlaneKey, &corev2alpha1.ControlPlane{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("ControlPlane still exists: %v", err)
+	}
+	if err := workspace.Get(ctx, client.ObjectKey{Name: workspaceNamespace}, &corev1.Namespace{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("workspace namespace still exists: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimeRefusesForeignRBACAdoption(t *testing.T) {
 	ctx := context.Background()
 	_, _, workspace := testRuntime(t)

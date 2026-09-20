@@ -109,7 +109,7 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 		return
 	}
 	reconcile := func() {
-		if err := r.reconcile(ctx, name, cl, workspaceConfig); err != nil && ctx.Err() == nil {
+		if err := r.reconcile(ctx, name, cl.GetClient(), workspaceConfig); err != nil && ctx.Err() == nil {
 			log.Error(err, "workspace runtime reconciliation failed")
 		}
 	}
@@ -127,19 +127,22 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 	}
 }
 
-func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster, workspaceConfig *rest.Config) error {
-	binding, err := r.workspaceBinding(ctx, cl.GetClient())
+func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client, workspaceConfig *rest.Config) error {
+	binding, err := r.workspaceBinding(ctx, workspaceClient)
 	if err != nil {
 		return err
+	}
+	if !binding.DeletionTimestamp.IsZero() {
+		return r.cleanupWorkspace(ctx, name, workspaceClient)
 	}
 	owner := workspaceBindingOwnerReference(binding)
 	workspaceNamespace := workspaceControlPlaneNamespace(name)
 	bootstrap := &defaultControlPlaneBootstrapper{log: r.log}
-	if err := bootstrap.ensureDefault(ctx, cl.GetClient(), workspaceNamespace, owner); err != nil {
+	if err := bootstrap.ensureDefault(ctx, workspaceClient, workspaceNamespace, owner); err != nil {
 		return err
 	}
 	if r.disconnectGuard != nil {
-		if err := r.ensureDisconnectWebhook(ctx, name, cl.GetClient(), binding); err != nil {
+		if err := r.ensureDisconnectWebhook(ctx, name, workspaceClient, binding); err != nil {
 			return err
 		}
 	}
@@ -153,7 +156,7 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	if err := r.reconcileClusterRequests(ctx, platformNamespace); err != nil {
 		return err
 	}
-	return r.reconcileAccessRequests(ctx, platformNamespace, cl.GetClient(), workspaceConfig, owner)
+	return r.reconcileAccessRequests(ctx, platformNamespace, workspaceClient, workspaceConfig, owner)
 }
 
 func directWorkspaceConfig(base *rest.Config, name multicluster.ClusterName) (*rest.Config, error) {
@@ -444,16 +447,22 @@ func (r *workspaceRuntime) scheduleCleanup(name multicluster.ClusterName, genera
 		r.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		if err := r.cleanupPlatform(ctx, name); err != nil {
+		if err := r.cleanupWorkspace(ctx, name, workspaceClient); err != nil {
 			log.Error(err, "workspace runtime cleanup failed")
 			return
 		}
-		if err := r.finalizeWorkspaceControlPlanes(ctx, name, workspaceClient); err != nil {
-			log.Error(err, "workspace ControlPlane cleanup failed")
-			return
-		}
-		r.cleanupWorkspaceAccess(name, workspaceClient, log)
 	})
+}
+
+func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client) error {
+	if err := r.cleanupPlatform(ctx, name); err != nil {
+		return err
+	}
+	if err := r.finalizeWorkspaceControlPlanes(ctx, name, workspaceClient); err != nil {
+		return err
+	}
+	r.cleanupWorkspaceAccess(name, workspaceClient, r.log)
+	return nil
 }
 
 func (r *workspaceRuntime) finalizeWorkspaceControlPlanes(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client) error {
