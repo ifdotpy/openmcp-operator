@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/openmcp-project/controller-utils/pkg/clusteraccess"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -128,52 +130,21 @@ func providerRuntimeRBACName(namespace, provider string) string {
 
 func (r *workspaceRuntime) ensureProviderRBAC(ctx context.Context, namespace, name string, provider workspaceProvider) error {
 	c := r.platform.Client()
-	labels := map[string]string{workspaceRuntimeLabel: namespace, appNameLabel: provider.Name}
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, sa, func() error {
-		sa.Labels = labels
-		return nil
-	}); err != nil {
+	labels := []clusteraccess.Label{{Key: workspaceRuntimeLabel, Value: namespace}, {Key: appNameLabel, Value: provider.Name}}
+	if _, err := clusteraccess.EnsureServiceAccount(ctx, c, name, namespace, labels...); err != nil {
 		return fmt.Errorf("ensure provider ServiceAccount: %w", err)
 	}
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, role, func() error {
-		role.Labels = labels
-		role.Rules = append([]rbacv1.PolicyRule{
-			{APIGroups: []string{clustersv1alpha1.GroupVersion.Group}, Resources: []string{"clusters", "clusterrequests", "clusterrequests/status", "accessrequests", "accessrequests/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
-			{APIGroups: []string{""}, Resources: []string{"secrets", "configmaps", "events"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
-			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
-		}, provider.RoleRules...)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("ensure provider Role: %w", err)
+	subjects := []rbacv1.Subject{{Kind: serviceAccountKind, Name: name, Namespace: namespace}}
+	rules := append([]rbacv1.PolicyRule{
+		{APIGroups: []string{clustersv1alpha1.GroupVersion.Group}, Resources: []string{"clusters", "clusterrequests", "clusterrequests/status", "accessrequests", "accessrequests/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
+		{APIGroups: []string{""}, Resources: []string{"secrets", "configmaps", "events"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
+		{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
+	}, provider.RoleRules...)
+	if _, _, err := clusteraccess.EnsureRoleAndBinding(ctx, c, name, namespace, subjects, rules, labels...); err != nil {
+		return fmt.Errorf("ensure provider Role and binding: %w", err)
 	}
-	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, rb, func() error {
-		rb.Labels = labels
-		rb.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: roleKind, Name: name}
-		rb.Subjects = []rbacv1.Subject{{Kind: serviceAccountKind, Name: name, Namespace: namespace}}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("ensure provider RoleBinding: %w", err)
-	}
-
-	cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, cr, func() error {
-		cr.Labels = labels
-		cr.Rules = append([]rbacv1.PolicyRule(nil), provider.ClusterRoleRules...)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("ensure provider ClusterRole: %w", err)
-	}
-	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, c, crb, func() error {
-		crb.Labels = labels
-		crb.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: clusterRoleKind, Name: name}
-		crb.Subjects = []rbacv1.Subject{{Kind: serviceAccountKind, Name: name, Namespace: namespace}}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("ensure provider ClusterRoleBinding: %w", err)
+	if _, _, err := clusteraccess.EnsureClusterRoleAndBinding(ctx, c, name, subjects, provider.ClusterRoleRules, labels...); err != nil {
+		return fmt.Errorf("ensure provider ClusterRole and binding: %w", err)
 	}
 	return nil
 }

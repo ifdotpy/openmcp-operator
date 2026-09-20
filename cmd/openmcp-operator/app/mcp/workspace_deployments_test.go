@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -69,5 +71,36 @@ func TestWorkspaceProviderDeploymentLifecycle(t *testing.T) {
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(unrelated), unrelated); err != nil {
 		t.Fatal("unrelated service account removed", err)
+	}
+}
+
+func TestWorkspaceProviderRejectsForeignRBAC(t *testing.T) {
+	for _, object := range []client.Object{
+		&corev1.ServiceAccount{}, &rbacv1.Role{}, &rbacv1.RoleBinding{},
+		&rbacv1.ClusterRole{}, &rbacv1.ClusterRoleBinding{},
+	} {
+		t.Run(fmt.Sprintf("%T", object), func(t *testing.T) {
+			ctx := context.Background()
+			r, platform, _ := testRuntime(t)
+			object.SetName("provider")
+			switch object.(type) {
+			case *corev1.ServiceAccount, *rbacv1.Role, *rbacv1.RoleBinding:
+				object.SetNamespace("tenant")
+			}
+			object.SetLabels(map[string]string{"owner": "someone-else"})
+			if err := platform.Create(ctx, object); err != nil {
+				t.Fatal(err)
+			}
+			before := object.DeepCopyObject()
+			if err := r.ensureProviderRBAC(ctx, "tenant", "provider", workspaceProvider{Name: "example"}); err == nil {
+				t.Fatal("accepted foreign RBAC object")
+			}
+			if err := platform.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, object) {
+				t.Fatal("modified foreign RBAC object")
+			}
+		})
 	}
 }

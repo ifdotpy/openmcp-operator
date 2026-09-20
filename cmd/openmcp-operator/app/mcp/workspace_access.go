@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openmcp-project/controller-utils/pkg/clusteraccess"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -17,8 +18,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
@@ -413,12 +412,7 @@ func mintWorkspaceCredential(ctx context.Context, c kubernetes.Interface, cfg *r
 	if token.Status.Token == "" || !token.Status.ExpirationTimestamp.After(time.Now()) {
 		return nil, time.Time{}, fmt.Errorf("token request returned no usable credential")
 	}
-	config, err := clientcmd.Write(clientcmdapi.Config{
-		Clusters:       map[string]*clientcmdapi.Cluster{workspaceClusterName: {Server: cfg.Host, CertificateAuthorityData: cfg.CAData}},
-		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"provider": {Token: token.Status.Token}},
-		Contexts:       map[string]*clientcmdapi.Context{workspaceClusterName: {Cluster: workspaceClusterName, AuthInfo: "provider"}},
-		CurrentContext: workspaceClusterName,
-	})
+	config, err := clusteraccess.CreateTokenKubeconfig("provider", cfg.Host, cfg.CAData, token.Status.Token)
 	return config, token.Status.ExpirationTimestamp.Time, err
 }
 
