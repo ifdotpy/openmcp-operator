@@ -26,7 +26,6 @@ import (
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
 	apiconst "github.com/openmcp-project/openmcp-operator/api/constants"
 	corev2alpha1 "github.com/openmcp-project/openmcp-operator/api/core/v2alpha1"
-	"github.com/openmcp-project/openmcp-operator/internal/controllers/controlplane"
 	libutils "github.com/openmcp-project/openmcp-operator/lib/utils"
 )
 
@@ -49,6 +48,8 @@ const (
 type workspaceRuntime struct {
 	log                logging.Logger
 	platform           *controllerclusters.Cluster
+	environment        string
+	providers          []workspaceProvider
 	bindingName        string
 	bindingExport      kcpapisv1alpha1.ExportBindingReference
 	reconcileInterval  time.Duration
@@ -227,7 +228,7 @@ func (r *workspaceRuntime) ensureWorkspaceRuntime(ctx context.Context, name mult
 		}
 		workspaceCluster.Spec = clustersv1alpha1.ClusterSpec{
 			Profile:  workspaceClusterProfile,
-			Purposes: []string{clustersv1alpha1.PURPOSE_MCP},
+			Purposes: []string{clustersv1alpha1.PURPOSE_ONBOARDING, clustersv1alpha1.PURPOSE_MCP},
 			Tenancy:  clustersv1alpha1.TENANCY_SHARED,
 		}
 		return nil
@@ -241,7 +242,7 @@ func (r *workspaceRuntime) ensureWorkspaceRuntime(ctx context.Context, name mult
 	if err := c.Status().Patch(ctx, workspaceCluster, client.MergeFrom(oldCluster)); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("mark workspace Cluster ready: %w", err)
 	}
-	return nil
+	return r.ensureWorkspaceProviders(ctx, namespace)
 }
 
 func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespace string) error {
@@ -252,7 +253,7 @@ func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespa
 	}
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if cr.Spec.Purpose != clustersv1alpha1.PURPOSE_MCP || cr.Labels[apiconst.ManagedByLabel] != controlplane.ControllerName {
+		if (cr.Spec.Purpose != clustersv1alpha1.PURPOSE_MCP && cr.Spec.Purpose != clustersv1alpha1.PURPOSE_ONBOARDING) || !r.ownsWorkspaceRequest(cr.Labels[apiconst.ManagedByLabel]) {
 			continue
 		}
 		workspaceCluster := &clustersv1alpha1.Cluster{}
@@ -412,6 +413,9 @@ func (r *workspaceRuntime) cleanupWorkspaceRuntime(ctx context.Context, name mul
 	if err := r.releaseRuntimeRequests(ctx, c, namespace); err != nil {
 		return err
 	}
+	if err := r.pruneProviderRuntime(ctx, namespace, nil, nil); err != nil {
+		return err
+	}
 	if err := c.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}); client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("delete workspace runtime namespace %q: %w", namespace, err)
 	}
@@ -420,11 +424,14 @@ func (r *workspaceRuntime) cleanupWorkspaceRuntime(ctx context.Context, name mul
 
 func (r *workspaceRuntime) releaseRuntimeRequests(ctx context.Context, c client.Client, namespace string) error {
 	accessRequests := &clustersv1alpha1.AccessRequestList{}
-	if err := c.List(ctx, accessRequests, client.InNamespace(namespace), client.MatchingLabels{apiconst.ManagedByLabel: controlplane.ControllerName}); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.List(ctx, accessRequests, client.InNamespace(namespace)); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("list runtime AccessRequests: %w", err)
 	}
 	for i := range accessRequests.Items {
 		request := &accessRequests.Items[i]
+		if !controllerutil.ContainsFinalizer(request, workspaceAccessFinalizer) {
+			continue
+		}
 		if controllerutil.RemoveFinalizer(request, workspaceAccessFinalizer) {
 			if err := c.Update(ctx, request); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("release AccessRequest %s: %w", request.Name, err)
@@ -441,11 +448,14 @@ func (r *workspaceRuntime) releaseRuntimeRequests(ctx context.Context, c client.
 		return fmt.Errorf("get runtime Cluster: %w", clusterErr)
 	}
 	clusterRequests := &clustersv1alpha1.ClusterRequestList{}
-	if err := c.List(ctx, clusterRequests, client.InNamespace(namespace), client.MatchingLabels{apiconst.ManagedByLabel: controlplane.ControllerName}); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.List(ctx, clusterRequests, client.InNamespace(namespace)); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("list runtime ClusterRequests: %w", err)
 	}
 	for i := range clusterRequests.Items {
 		request := &clusterRequests.Items[i]
+		if !controllerutil.ContainsFinalizer(request, workspaceRequestFinalizer) {
+			continue
+		}
 		if clusterErr == nil && controllerutil.RemoveFinalizer(cluster, request.FinalizerForCluster()) {
 			if err := c.Update(ctx, cluster); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("release runtime Cluster: %w", err)

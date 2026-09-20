@@ -7,6 +7,7 @@ import (
 	"time"
 
 	kcpapisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -21,6 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+
+	providerv1alpha1 "github.com/openmcp-project/openmcp-operator/api/provider/v1alpha1"
 
 	controllerclusters "github.com/openmcp-project/controller-utils/pkg/clusters"
 	"github.com/openmcp-project/controller-utils/pkg/logging"
@@ -37,7 +40,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		corev1.AddToScheme, rbacv1.AddToScheme, kcpapisv1alpha1.AddToScheme,
+		corev1.AddToScheme, appsv1.AddToScheme, providerv1alpha1.AddToScheme, rbacv1.AddToScheme, kcpapisv1alpha1.AddToScheme,
 		clustersv1alpha1.AddToScheme, corev2alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
@@ -122,7 +125,7 @@ func TestDirectWorkspaceConfigUsesLogicalClusterEndpoint(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimeRegistersOnlyMCPCluster(t *testing.T) {
+func TestWorkspaceRuntimeRegistersAPICluster(t *testing.T) {
 	ctx := context.Background()
 	r, platform, _ := testRuntime(t)
 	name := multicluster.ClusterName("root:tenants:demo")
@@ -138,8 +141,8 @@ func TestWorkspaceRuntimeRegistersOnlyMCPCluster(t *testing.T) {
 	if err := platform.Get(ctx, client.ObjectKey{Namespace: namespace, Name: workspaceClusterName}, cluster); err != nil {
 		t.Fatal(err)
 	}
-	if len(cluster.Spec.Purposes) != 1 || cluster.Spec.Purposes[0] != clustersv1alpha1.PURPOSE_MCP {
-		t.Fatalf("workspace cluster has non-MCP purposes: %#v", cluster.Spec.Purposes)
+	if len(cluster.Spec.Purposes) != 2 || cluster.Spec.Purposes[0] != clustersv1alpha1.PURPOSE_ONBOARDING || cluster.Spec.Purposes[1] != clustersv1alpha1.PURPOSE_MCP {
+		t.Fatalf("workspace cluster has unexpected purposes: %#v", cluster.Spec.Purposes)
 	}
 	gotEndpoint, found := cluster.Status.Endpoints.Get(clustersv1alpha1.APISERVER_ENDPOINT_EXTERNAL)
 	if cluster.Status.Phase != commonapi.StatusPhaseReady || !found || gotEndpoint != endpoint {
@@ -329,5 +332,34 @@ func TestConsumerCredentialsUseNativeWorkspace(t *testing.T) {
 	}
 	if virtual.Host != "https://virtual.example/services/clusters/tenant" || virtual.BearerToken != "provider-token" {
 		t.Fatal("provider configuration was changed")
+	}
+}
+
+func TestWorkspaceRuntimeLeavesWorkloadRequestsToScheduler(t *testing.T) {
+	r, platform, _ := testRuntime(t)
+	r.providers = []workspaceProvider{{Name: "provider", Resource: metav1.GroupVersionKind{Group: "services.example.io", Version: "v1", Kind: "Service"}}}
+	ctx := context.Background()
+	request := &clustersv1alpha1.ClusterRequest{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant", Labels: map[string]string{apiconst.ManagedByLabel: "Service"}}, Spec: clustersv1alpha1.ClusterRequestSpec{Purpose: clustersv1alpha1.PURPOSE_WORKLOAD}}
+	if err := platform.Create(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcileClusterRequests(ctx, "tenant"); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.Get(ctx, client.ObjectKeyFromObject(request), request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Status.Cluster != nil || len(request.Finalizers) != 0 {
+		t.Fatalf("workspace runtime claimed workload request: %#v", request)
+	}
+}
+
+func TestWorkspaceProviderRequestOwnership(t *testing.T) {
+	r, _, _ := testRuntime(t)
+	r.providers = []workspaceProvider{{Resource: metav1.GroupVersionKind{Group: "services.example.io", Version: "v1", Kind: "Service"}}}
+	for manager, expected := range map[string]bool{controlplane.ControllerName: true, "Service": true, "service.services.example.io": true, "Unknown": false, "": false} {
+		if got := r.ownsWorkspaceRequest(manager); got != expected {
+			t.Errorf("manager %q: got %v, want %v", manager, got, expected)
+		}
 	}
 }

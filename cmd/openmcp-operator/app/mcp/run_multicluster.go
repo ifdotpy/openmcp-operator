@@ -47,9 +47,9 @@ func (c workspaceOnboardingCluster) Scheme() *runtime.Scheme { return c.scheme }
 // The reconciler code is unchanged: per request, a shallow copy of the
 // reconciler is bound to the tenant workspace (its client becomes the
 // OnboardingCluster of that copy). The workspace runtime gives every workspace a
-// unique internal ControlPlane namespace. Service-provider placement is outside
-// this mode: providers only consume the workspace credential produced by the
-// standard ControlPlane lifecycle.
+// unique internal ControlPlane namespace and can deploy configured service providers
+// there. Each provider independently selects where its managed controllers run;
+// their API target remains the workspace.
 func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logger) error {
 	setupLog.Info("KCP workspace mode", "endpointSlice", o.KCPEndpointSlice)
 
@@ -156,16 +156,21 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 
 	// One runtime is created dynamically for every workspace that binds the APIExport.
 	// It registers the workspace itself as the MCP cluster and resolves only the
-	// ClusterRequest and AccessRequest resources owned by the ControlPlane controller.
+	// ClusterRequest and AccessRequest resources owned by the ControlPlane or configured providers.
 	runtime := &workspaceRuntime{
 		log:                setupLog,
 		platform:           o.PlatformCluster,
+		environment:        o.Environment,
+		providers:          o.KCPWorkspaceProviders,
 		bindingName:        o.KCPBindingName,
 		bindingExport:      endpointSlice.Spec.APIExport,
 		reconcileInterval:  o.KCPWorkspaceReconcileInterval,
 		cleanupDelay:       o.KCPWorkspaceCleanupDelay,
 		tokenLifetime:      o.KCPWorkspaceTokenLifetime,
 		consumerBaseConfig: cfg,
+	}
+	if err := runtime.reconcileServiceProviders(ctx); err != nil {
+		return err
 	}
 	if err := mcMgr.Add(runtime); err != nil {
 		return fmt.Errorf("unable to add workspace runtime: %w", err)

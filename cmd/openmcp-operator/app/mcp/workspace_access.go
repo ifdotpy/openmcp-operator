@@ -26,7 +26,6 @@ import (
 	clustersv1alpha1 "github.com/openmcp-project/openmcp-operator/api/clusters/v1alpha1"
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
 	apiconst "github.com/openmcp-project/openmcp-operator/api/constants"
-	"github.com/openmcp-project/openmcp-operator/internal/controllers/controlplane"
 )
 
 const workspaceAccessOwnerLabel = "workspace.openmcp.cloud/access-uid"
@@ -43,10 +42,13 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 	}
 	for i := range list.Items {
 		ar := &list.Items[i]
-		if ar.Labels[apiconst.ManagedByLabel] != controlplane.ControllerName {
+		if !r.ownsWorkspaceRequest(ar.Labels[apiconst.ManagedByLabel]) {
 			continue
 		}
 		if !ar.DeletionTimestamp.IsZero() {
+			if !controllerutil.ContainsFinalizer(ar, workspaceAccessFinalizer) {
+				continue
+			}
 			done, err := revokeWorkspaceAccess(ctx, workspaceClient, ar)
 			if err != nil {
 				return err

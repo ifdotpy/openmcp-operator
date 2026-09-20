@@ -66,6 +66,7 @@ func (o *RunOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().DurationVar(&o.KCPWorkspaceReconcileInterval, "kcp-workspace-reconcile-interval", 5*time.Second, "KCP workspace mode: interval for workspace runtime reconciliation.")
 	cmd.Flags().DurationVar(&o.KCPWorkspaceCleanupDelay, "kcp-workspace-cleanup-delay", time.Minute, "KCP workspace mode: delay before workspace runtime removal after disengagement.")
 	cmd.Flags().DurationVar(&o.KCPWorkspaceTokenLifetime, "kcp-workspace-token-lifetime", time.Hour, "KCP workspace mode: lifetime of account workspace credentials.")
+	cmd.Flags().StringVar(&o.KCPServiceProviders, "kcp-service-providers", "", "KCP workspace mode: JSON configuration of per-workspace service providers.")
 	cmd.Flags().StringVar(&o.KCPBindingName, "kcp-binding-name", "", "KCP workspace mode: preferred APIBinding name. The operator otherwise discovers the binding from the endpoint slice export.")
 	// kubebuilder default flags
 	cmd.Flags().StringVar(&o.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -103,6 +104,8 @@ type RawRunOptions struct {
 }
 
 type RunOptions struct {
+	KCPServiceProviders   string              `json:"kcp-service-providers"`
+	KCPWorkspaceProviders []workspaceProvider `json:"-"`
 	// KCPEndpointSlice enables KCP workspace mode: the
 	// name of the APIExportEndpointSlice whose virtual workspace serves the
 	// bound workspaces. Empty = classic single-onboarding-cluster mode.
@@ -150,6 +153,11 @@ func (o *RunOptions) Complete(ctx context.Context) error {
 		if o.KCPKubeconfig == "" {
 			return fmt.Errorf("kcp-kubeconfig must not be empty in KCP workspace mode")
 		}
+		providers, err := loadWorkspaceProviders(o.KCPServiceProviders)
+		if err != nil {
+			return err
+		}
+		o.KCPWorkspaceProviders = providers
 		if o.KCPWorkspaceReconcileInterval <= 0 {
 			return fmt.Errorf("kcp-workspace-reconcile-interval must be positive")
 		}

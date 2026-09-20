@@ -10,7 +10,7 @@ The mode depends only on KCP APIs and these lifecycle signals:
 - The matching `APIBinding` owns workspace-local bootstrap and access objects.
 - APIExport disengagement removes the host runtime after the cleanup delay.
 
-The operator creates `ControlPlane/default` in the engaged workspace. The ControlPlane controller creates its normal host namespace, `ClusterRequest`, and `AccessRequest`. The workspace runtime registers the same workspace as the single `mcp` cluster, grants only requests owned by the ControlPlane controller, and issues bounded credentials scoped to that workspace. It does not create a nested Kubernetes cluster.
+The operator creates `ControlPlane/default` in the engaged workspace. The ControlPlane controller creates its normal host namespace, `ClusterRequest`, and `AccessRequest`. The workspace runtime registers the same workspace as the onboarding and MCP API cluster, grants requests owned by the ControlPlane controller or explicitly configured providers, and issues bounded credentials scoped to that workspace. It does not create a nested Kubernetes cluster.
 
 Enable the mode with these flags:
 
@@ -29,4 +29,27 @@ The optional runtime flags control reconciliation, cleanup, and credential durat
 --kcp-workspace-token-lifetime=1h
 ```
 
-Service-provider placement is deliberately outside this mode. A KCP workspace serves APIs but has no Kubernetes workload APIs such as `Deployment` or `Service`. A provider that installs controllers must choose a workload cluster independently and use the ControlPlane credential to address the account workspace. This keeps the operator's KCP support independent of any product-specific provider or hosting platform.
+Optional per-workspace provider deployments are configured with `--kcp-service-providers=<JSON file>`. The operator creates a dedicated ServiceAccount and RBAC for each deployment and removes them when the workspace runtime is removed. The configuration supplies the provider image, resource GVK, additional arguments, and required RBAC. No particular provider is built into the operator.
+
+Service-controller placement remains the responsibility of each provider. A KCP workspace serves APIs but has no Kubernetes workload APIs such as `Deployment` or `Service`. A provider that installs controllers must choose a Kubernetes cluster independently and use the ControlPlane credential to address the KCP workspace. This keeps the operator's KCP support independent of any product-specific provider or hosting platform.
+
+Example provider configuration (RBAC rules depend on the provider):
+
+```json
+[
+  {
+    "name": "example-provider",
+    "providerName": "example",
+    "image": "registry.example/provider:v1",
+    "resource": {"group": "services.example.io", "version": "v1", "kind": "Example"},
+    "args": ["--service-controller-cluster=platform"],
+    "roleRules": [],
+    "clusterRoleRules": []
+  }
+]
+```
+
+The operator resolves only onboarding and MCP requests to the workspace API.
+Workload requests remain the responsibility of the normal cluster scheduler.
+Provider configuration is trusted administrator input; its RBAC rules must match
+what the configured provider needs on the platform cluster.
