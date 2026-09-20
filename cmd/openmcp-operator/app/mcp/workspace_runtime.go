@@ -10,6 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -347,6 +349,19 @@ func (r *workspaceRuntime) scheduleCleanup(name multicluster.ClusterName, genera
 }
 
 func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client) error {
+	// Providers own service finalizers. Keep their runtime and credentials until
+	// every service is gone, including during deletion of the whole workspace.
+	for _, provider := range r.providers {
+		services := &unstructured.UnstructuredList{}
+		gvk := schema.GroupVersionKind(provider.Resource)
+		services.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
+		if err := workspaceClient.List(ctx, services, client.Limit(1)); err != nil {
+			return fmt.Errorf("check remaining %s services: %w", gvk.Kind, err)
+		}
+		if len(services.Items) != 0 {
+			return fmt.Errorf("waiting for %s services to finish deletion", gvk.Kind)
+		}
+	}
 	if err := r.cleanupWorkspaceRuntime(ctx, name); err != nil {
 		return err
 	}
