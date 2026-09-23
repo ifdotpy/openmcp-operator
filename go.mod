@@ -15,6 +15,8 @@ require (
 	github.com/fluxcd/pkg/apis/kustomize v1.20.0
 	github.com/fluxcd/pkg/apis/meta v1.31.0
 	github.com/fluxcd/source-controller/api v1.9.5
+	github.com/kcp-dev/logicalcluster/v3 v3.0.5
+	github.com/kcp-dev/sdk v0.32.0
 	github.com/onsi/ginkgo/v2 v2.32.2
 	github.com/onsi/gomega v1.43.0
 	github.com/openmcp-project/controller-utils v0.33.1
@@ -27,6 +29,7 @@ require (
 	k8s.io/client-go v0.37.0
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
 	sigs.k8s.io/controller-runtime v0.25.1
+	sigs.k8s.io/multicluster-runtime v0.24.1
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -90,6 +93,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
+	go.uber.org/goleak v1.3.1-0.20251210191316-2b7fd8a0d244 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
