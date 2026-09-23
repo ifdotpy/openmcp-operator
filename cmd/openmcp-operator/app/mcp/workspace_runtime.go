@@ -105,6 +105,7 @@ func (r *workspaceRuntime) run(ctx context.Context, name multicluster.ClusterNam
 		log.Error(err, "cannot address consumer workspace")
 		return
 	}
+
 	reconcile := func() {
 		if err := r.reconcile(ctx, name, cl.GetClient(), workspaceConfig); err != nil && ctx.Err() == nil {
 			log.Error(err, "workspace runtime reconciliation failed")
@@ -156,13 +157,33 @@ func (r *workspaceRuntime) reconcile(ctx context.Context, name multicluster.Clus
 	if err != nil {
 		return err
 	}
+	retained, err := r.retainedProviderManagers(ctx, workspaceClient)
+	if err != nil {
+		return err
+	}
 	if err := r.ensureWorkspaceRuntime(ctx, name, runtimeNamespace, workspaceConfig.Host); err != nil {
 		return err
 	}
-	if err := r.reconcileClusterRequests(ctx, runtimeNamespace); err != nil {
+	if err := r.reconcileClusterRequests(ctx, runtimeNamespace, retained); err != nil {
 		return err
 	}
-	return r.reconcileAccessRequests(ctx, runtimeNamespace, workspaceClient, workspaceConfig, owner)
+	if err := r.ensureSharedProviderAccess(ctx, runtimeNamespace); err != nil {
+		return err
+	}
+	if err := r.reconcileAccessRequests(ctx, runtimeNamespace, workspaceClient, workspaceConfig, owner, retained); err != nil {
+		return err
+	}
+	pending, err := r.hasRetiredRequests(ctx, runtimeNamespace)
+	if err != nil {
+		return err
+	}
+	preserve := len(retained) > 0 || pending
+	if !preserve {
+		if err := r.pruneConfiguredProviderRuntime(ctx, runtimeNamespace); err != nil {
+			return err
+		}
+	}
+	return r.publishSharedProviderRegistrations(ctx, runtimeNamespace, workspaceNamespace, preserve)
 }
 
 func (r *workspaceRuntime) workspaceBinding(ctx context.Context, c client.Client) (*kcpapisv1alpha1.APIBinding, error) {
@@ -253,7 +274,11 @@ func (r *workspaceRuntime) ensureWorkspaceRuntime(ctx context.Context, name mult
 	return r.ensureWorkspaceProviders(ctx, namespace)
 }
 
-func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespace string) error {
+func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespace string, retained map[string]bool) error {
+	return r.reconcileClusterRequestsWithMode(ctx, namespace, retained, false)
+}
+
+func (r *workspaceRuntime) reconcileClusterRequestsWithMode(ctx context.Context, namespace string, retained map[string]bool, deletingOnly bool) error {
 	c := r.platform.Client()
 	list := &clustersv1alpha1.ClusterRequestList{}
 	if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -261,7 +286,15 @@ func (r *workspaceRuntime) reconcileClusterRequests(ctx context.Context, namespa
 	}
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if (cr.Spec.Purpose != clustersv1alpha1.PURPOSE_MCP && cr.Spec.Purpose != clustersv1alpha1.PURPOSE_ONBOARDING) || !r.ownsWorkspaceRequest(cr.Labels[apiconst.ManagedByLabel]) {
+		if deletingOnly && cr.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if skip, err := r.retireWorkspaceRequest(ctx, cr, workspaceRequestFinalizer, retained); err != nil {
+			return err
+		} else if skip {
+			continue
+		}
+		if cr.DeletionTimestamp.IsZero() && cr.Spec.Purpose != clustersv1alpha1.PURPOSE_MCP && cr.Spec.Purpose != clustersv1alpha1.PURPOSE_ONBOARDING {
 			continue
 		}
 		workspaceCluster := &clustersv1alpha1.Cluster{}
@@ -355,6 +388,23 @@ func (r *workspaceRuntime) scheduleCleanup(name multicluster.ClusterName, genera
 }
 
 func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multicluster.ClusterName, workspaceClient client.Client) error {
+	runtimeNamespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceControlPlaneNamespace(name))
+	if err != nil {
+		return err
+	}
+	if err := r.reconcileClusterRequestsWithMode(ctx, runtimeNamespace, nil, true); err != nil {
+		return err
+	}
+	if err := r.reconcileAccessRequestsWithMode(ctx, runtimeNamespace, workspaceClient, nil, metav1.OwnerReference{}, nil, true); err != nil {
+		return err
+	}
+	retained, err := r.retainedProviderManagers(ctx, workspaceClient)
+	if err != nil {
+		return err
+	}
+	if len(retained) != 0 {
+		return fmt.Errorf("waiting for retired provider services to finish deletion")
+	}
 	// Providers own service finalizers. Keep their runtime and credentials until
 	// every service is gone, including during deletion of the whole workspace.
 	for _, provider := range r.providers {
@@ -497,4 +547,35 @@ func (r *workspaceRuntime) releaseRuntimeRequests(ctx context.Context, c client.
 		}
 	}
 	return nil
+}
+
+// retireWorkspaceRequest keeps ownership across provider configuration changes.
+// Only requests previously claimed or created by this runtime may be removed.
+// Provider-requested deletion must still complete while the service finalizer remains.
+func (r *workspaceRuntime) retireWorkspaceRequest(ctx context.Context, request client.Object, finalizer string, retained map[string]bool) (bool, error) {
+	if r.ownsWorkspaceRequest(request.GetLabels()[apiconst.ManagedByLabel]) {
+		return false, nil
+	}
+
+	if ar, ok := request.(*clustersv1alpha1.AccessRequest); ok && isWorkspaceOnboardingRequest(ar) && ar.DeletionTimestamp.IsZero() {
+		if controllerutil.AddFinalizer(ar, finalizer) {
+			if err := r.platform.Client().Update(ctx, ar); err != nil {
+				return false, err
+			}
+		}
+	}
+	if !controllerutil.ContainsFinalizer(request, finalizer) {
+		return true, nil
+	}
+	if retained[request.GetLabels()[apiconst.ManagedByLabel]] {
+		return false, nil
+	}
+	c := r.platform.Client()
+	if request.GetDeletionTimestamp().IsZero() {
+		if err := c.Delete(ctx, request); client.IgnoreNotFound(err) != nil {
+			return false, err
+		}
+	}
+	err := c.Get(ctx, client.ObjectKeyFromObject(request), request)
+	return apierrors.IsNotFound(err), client.IgnoreNotFound(err)
 }

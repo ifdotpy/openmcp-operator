@@ -54,7 +54,7 @@ func testRuntime(t *testing.T) (*workspaceRuntime, client.Client, client.Client)
 	t.Helper()
 	scheme := testScheme(t)
 	platform := clientfake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&clustersv1alpha1.Cluster{}, &clustersv1alpha1.ClusterRequest{}, &clustersv1alpha1.AccessRequest{}).
+		WithStatusSubresource(&providerv1alpha1.ServiceProvider{}, &clustersv1alpha1.Cluster{}, &clustersv1alpha1.ClusterRequest{}, &clustersv1alpha1.AccessRequest{}).
 		Build()
 	workspace := clientfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev2alpha1.ControlPlane{}).Build()
 	log, err := logging.New(&logging.Config{})
@@ -165,7 +165,7 @@ func TestWorkspaceRuntimeSchedulesOnlyControlPlaneRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := r.reconcileClusterRequests(ctx, namespace); err != nil {
+	if err := r.reconcileClusterRequests(ctx, namespace, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(managed), managed); err != nil {
@@ -194,7 +194,7 @@ func TestWorkspaceRuntimeIssuesOnlyControlPlaneCredential(t *testing.T) {
 	if err := platform.Create(ctx, request); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.reconcileClusterRequests(ctx, namespace); err != nil {
+	if err := r.reconcileClusterRequests(ctx, namespace, nil); err != nil {
 		t.Fatal(err)
 	}
 	managed := &clustersv1alpha1.AccessRequest{ObjectMeta: metav1.ObjectMeta{Name: "admin", Namespace: namespace, UID: types.UID("access"), Labels: managedLabels()}, Spec: clustersv1alpha1.AccessRequestSpec{RequestRef: &commonapi.ObjectReference{Name: request.Name, Namespace: namespace}, Token: &clustersv1alpha1.TokenConfig{RoleRefs: []commonapi.RoleRef{{Kind: clusterRoleKind, Name: "cluster-admin"}}}}}
@@ -213,7 +213,7 @@ func TestWorkspaceRuntimeIssuesOnlyControlPlaneCredential(t *testing.T) {
 	})
 	configureTestWorkspaceIssuer(t, r, workspace, managed, clientset)
 	cfg := &rest.Config{Host: "https://kcp.example/clusters/demo", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("ca")}}
-	if err := r.reconcileAccessRequests(ctx, namespace, workspace, cfg, testBindingOwner()); err != nil {
+	if err := r.reconcileAccessRequests(ctx, namespace, workspace, cfg, testBindingOwner(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(managed), managed); err != nil {
@@ -319,22 +319,6 @@ func contains(values []string, wanted string) bool {
 	return false
 }
 
-func TestConsumerCredentialsUseNativeWorkspace(t *testing.T) {
-	r := &workspaceRuntime{consumerBaseConfig: &rest.Config{Host: "https://kcp.example/clusters/root:providers", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("native-ca")}}}
-	virtual := &rest.Config{Host: "https://virtual.example/services/clusters/tenant", BearerToken: "provider-token"}
-	cfg, err := r.consumerWorkspaceConfig(multicluster.ClusterName("tenant"), virtual)
-	if err != nil {
-		t.Fatal(err)
-	}
-	issuer := workspaceIssuerConfig(cfg, "consumer-token")
-	if issuer.Host != "https://kcp.example/clusters/tenant" || issuer.BearerToken != "consumer-token" || string(issuer.CAData) != "native-ca" {
-		t.Fatal("consumer credential did not use native workspace configuration")
-	}
-	if virtual.Host != "https://virtual.example/services/clusters/tenant" || virtual.BearerToken != "provider-token" {
-		t.Fatal("provider configuration was changed")
-	}
-}
-
 func TestWorkspaceRuntimeLeavesWorkloadRequestsToScheduler(t *testing.T) {
 	r, platform, _ := testRuntime(t)
 	r.providers = []workspaceProvider{{Name: "provider", Resource: metav1.GroupVersionKind{Group: "services.example.io", Version: "v1", Kind: "Service"}}}
@@ -343,7 +327,7 @@ func TestWorkspaceRuntimeLeavesWorkloadRequestsToScheduler(t *testing.T) {
 	if err := platform.Create(ctx, request); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.reconcileClusterRequests(ctx, "tenant"); err != nil {
+	if err := r.reconcileClusterRequests(ctx, "tenant", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Get(ctx, client.ObjectKeyFromObject(request), request); err != nil {
@@ -361,5 +345,21 @@ func TestWorkspaceProviderRequestOwnership(t *testing.T) {
 		if got := r.ownsWorkspaceRequest(manager); got != expected {
 			t.Errorf("manager %q: got %v, want %v", manager, got, expected)
 		}
+	}
+}
+
+func TestConsumerCredentialsUseNativeWorkspace(t *testing.T) {
+	r := &workspaceRuntime{consumerBaseConfig: &rest.Config{Host: "https://kcp.example/clusters/root:providers", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("native-ca")}}}
+	virtual := &rest.Config{Host: "https://virtual.example/services/clusters/tenant", BearerToken: "provider-token"}
+	cfg, err := r.consumerWorkspaceConfig(multicluster.ClusterName("tenant"), virtual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := workspaceIssuerConfig(cfg, "consumer-token")
+	if issuer.Host != "https://kcp.example/clusters/tenant" || issuer.BearerToken != "consumer-token" || string(issuer.CAData) != "native-ca" {
+		t.Fatal("consumer credential did not use native workspace configuration")
+	}
+	if virtual.Host != "https://virtual.example/services/clusters/tenant" || virtual.BearerToken != "provider-token" {
+		t.Fatal("provider configuration was changed")
 	}
 }

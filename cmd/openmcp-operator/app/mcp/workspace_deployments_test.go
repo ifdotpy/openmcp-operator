@@ -47,7 +47,7 @@ func TestWorkspaceProviderDeploymentLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.providers = nil
-	if err := r.ensureWorkspaceProviders(ctx, "tenant"); err != nil {
+	if err := r.pruneConfiguredProviderRuntime(ctx, "tenant"); err != nil {
 		t.Fatal(err)
 	}
 	for _, list := range []client.ObjectList{&appsv1.DeploymentList{}, &rbacv1.ClusterRoleList{}, &rbacv1.ClusterRoleBindingList{}} {

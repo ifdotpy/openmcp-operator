@@ -81,5 +81,14 @@ func (r *workspaceRuntime) resolveDisconnectWorkspace(ctx context.Context, clust
 	if err := c.Get(ctx, client.ObjectKey{Name: kcpcorev1alpha1.LogicalClusterName}, logical); err != nil {
 		return nil, false, err
 	}
+	if logical.DeletionTimestamp.IsZero() {
+		retained, err := r.retainedProviderManagers(ctx, c)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(retained) > 0 {
+			return nil, false, fmt.Errorf("retired provider services remain in the workspace")
+		}
+	}
 	return c, !logical.DeletionTimestamp.IsZero(), nil
 }
