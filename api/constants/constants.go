@@ -1,7 +1,7 @@
 package constants
 
 const (
-	// OpenMCPGroupName is the base API group name for OpenMCP.
+	// OpenMCPGroupName is the base API group name for the open control plane.
 	OpenMCPGroupName = "openmcp.cloud"
 	// OpenControlPlaneGroup is the new group name.
 	OpenControlPlaneGroup = "open-control-plane.io"

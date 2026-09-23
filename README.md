@@ -4,8 +4,7 @@
 
 ## About this project
 
-The `openmcp-operator` is the central and mandatory component of an openMCP landscape.
-The `openmcp-operator` is a Kubernetes operator that contains resource controllers for the following use cases:
+The `openmcp-operator` manages open control planes. Its controllers support these use cases:
 
 * Deployment Controller: The Deployment Controller is responsible to create Kubernetes deployments and manage the lifecycle for `ClusterProviders`, `ServiceProviders` and `PlatformServices` Kubernetes resources on the platform cluster.
 * Cluster Scheduler: The cluster scheduler reads `ClusterRequests` and creates either new `Clusters` or reuses existing `Clusters` on the platform cluster. The `Cluster` resources are managed by a `ClusterProvider`, which is not part of the `openmcp-operator`. The scheduling behavior can be configured by a scheduler configuration.

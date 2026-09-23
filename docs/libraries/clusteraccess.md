@@ -4,7 +4,7 @@ The ClusterAccess library in `lib/clusteraccess` is all about getting access to 
 
 ## Background: MCP Clusters, Workload Clusters, and Service Providers
 
-For a better understanding of where this library comes from, let's do a quick recap of the openMCP architecture:
+This section describes the open control plane architecture used by this library.
 
 Customers have access to a single, shared **onboarding cluster**. They can create `ManagedControlPlane` resources (MCPs) there and request services by creating *service resources* (e.g. for `Flux`, `Landscaper`, etc.) next to the MCPs. Each MCP results in an **MCP cluster** - the customer has access to the ones belonging to his own MCPs and the APIs for the services he requested (k8s CRDs) will be made available on this cluster. As this is a managed service, the customer should not have access to any managed controllers, therefore the service controllers (e.g. the Flux controller, the Landscaper controller, etc.) are usually running in so-called **workload clusters**. Workload clusters cannot be accessed by customers and controllers for multiple different MCPs can be hosted on the same workload cluster.
 
@@ -208,7 +208,7 @@ Note that this mechanism can also cause the `AccessRequest` to be deleted, if al
 
 #### Testing Environments
 
-The resources created by the ClusterAccess Reconciler rely on other parts of the openmcp architecture, especially the scheduler (for `ClusterRequest`s) and a ClusterProvider (for `Cluster`s from `ClusterRequest`s and for `AccessRequest`s) which are not always present when testing a controller that uses this library, especially for unit tests. To avoid having multiple code paths in the controller, the ClusterAccess Reconciler offers some form of extension hook mechanism that allows to mock the actions that are usually taken over by other controllers.
+The resources created by the ClusterAccess Reconciler need the open control plane scheduler for `ClusterRequest`s. They also need a ClusterProvider for `Cluster`s and `AccessRequest`s. These controllers might be unavailable in unit tests. The reconciler's extension hooks let tests replace their actions without a separate code path.
 
 On the `ClusterAccessReconciler`, the `WithFakingCallback` method can be used to register callback functions that are executed at specific points during the reconciler's `Reconciler`/`ReconcileDelete` method, depending on the specified `key`.
 

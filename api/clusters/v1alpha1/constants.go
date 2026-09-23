@@ -58,7 +58,7 @@ const (
 	// ProviderLabel can be used to display the provider of the cluster.
 	// It is also used to indicate the provider that is responsible for an AccessRequest.
 	// For clusters, the responsible ClusterProvider has to set this label.
-	// For AccessRequests, the generic controller that is part of the openMCP Operator sets it.
+	// For AccessRequests, the open control plane operator sets this label.
 	ProviderLabel = GroupName + "/provider"
 
 	// DeleteWithoutRequestsLabel marks that the corresponding cluster can be deleted if the scheduler removes the last request pointing to it.

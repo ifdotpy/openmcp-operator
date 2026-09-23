@@ -1,6 +1,6 @@
 # Cluster Scheduler
 
-The _Cluster Scheduler_ that is part of the openMCP Operator is responsible for answering `ClusterRequest` resources by either creating new `Cluster` resources or referencing existing ones.
+The open control plane operator's _Cluster Scheduler_ answers each `ClusterRequest`. It creates a `Cluster` or uses an existing one.
 
 ## Configuration
 

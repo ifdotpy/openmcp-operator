@@ -123,7 +123,7 @@ func (o *InitOptions) Run(ctx context.Context) error {
 
 	crdManager := crdutil.NewCRDManager(apiconst.ClusterLabel, crds.CRDs)
 
-	// deploy only onboarding CRDs here, because the openMCP operator already deployed the platform CRDs
+	// Deploy only onboarding CRDs. The open control plane operator has already deployed the platform CRDs.
 	crdManager.AddCRDLabelToClusterMapping(clustersv1alpha1.PURPOSE_ONBOARDING, onboardingCluster)
 	crdManager.SkipCRDsWithClusterLabel(clustersv1alpha1.PURPOSE_PLATFORM)
 

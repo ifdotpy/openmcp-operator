@@ -36,7 +36,7 @@ const Finalizer = clustersv1alpha1.GroupName + "/clusteraccess"
 /// INTERFACES ///
 //////////////////
 
-// ClusterAccessReconciler is an interface for reconciling access k8s clusters based on the openMCP 'Cluster' API.
+// ClusterAccessReconciler reconciles access to Kubernetes clusters through the open control plane Cluster API.
 // It can create ClusterRequests and/or AccessRequests for an amount of clusters.
 type ClusterAccessReconciler interface {
 	// Register registers a cluster to be managed by the reconciler.

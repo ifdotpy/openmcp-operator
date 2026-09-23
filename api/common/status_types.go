@@ -11,7 +11,7 @@ const (
 	StatusPhaseTerminating = "Terminating"
 )
 
-// Status represents the status of an openMCP resource.
+// Status represents the status of an open control plane resource.
 type Status struct {
 	// ObservedGeneration is the generation of this resource that was last reconciled by the controller.
 	ObservedGeneration int64 `json:"observedGeneration"`

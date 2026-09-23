@@ -1,6 +1,6 @@
 # Deployment Controllers
 
-An OpenMCP landscape has three controllers (called _deployment controllers_) which are responsible for deploying other controllers (called _providers_):
+An open control plane has three deployment controllers. They deploy other controllers called providers:
 
 - the **ClusterProvider Controller** is responsible for deploying cluster providers. 
 - the **ServiceProvider Controller** is responsible for deploying service providers.

@@ -32,7 +32,7 @@ const (
 	suffixWorkload = "wl"
 )
 
-// Reconciler is an interface for reconciling access to openMCP clusters.
+// Reconciler is an interface for reconciling access to open control plane clusters.
 // It creates and manages AccessRequests and ClusterRequests for MCP and Workload clusters.
 // The Reconciler is being used by service providers to manager the access to an MCP and Workload cluster
 // that are being manged for an instance of a service provider resource.

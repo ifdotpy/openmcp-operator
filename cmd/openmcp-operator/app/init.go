@@ -40,7 +40,7 @@ func NewInitCommand(po *options.PersistentOptions) *cobra.Command {
 	}
 	cmd := &cobra.Command{
 		Use:   initCommand,
-		Short: "Initialize the openMCP Operator",
+		Short: "Initialize the open control plane operator",
 		Run: func(cmd *cobra.Command, args []string) {
 			opts.PrintRawOptions(cmd)
 			if err := opts.Complete(cmd.Context()); err != nil {
