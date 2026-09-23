@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
@@ -44,7 +45,12 @@ import (
 
 const ControllerName = "ManagedControlPlane"
 
-func NewManagedControlPlaneReconciler(platformCluster *clusters.Cluster, onboardingCluster *clusters.Cluster, eventRecorder events.EventRecorder, configGetter config.ManagedControlPlaneConfigGetter, configMapName string) (*ManagedControlPlaneReconciler, error) {
+type OnboardingCluster interface {
+	Client() client.Client
+	Scheme() *runtime.Scheme
+}
+
+func NewManagedControlPlaneReconciler(platformCluster *clusters.Cluster, onboardingCluster OnboardingCluster, eventRecorder events.EventRecorder, configGetter config.ManagedControlPlaneConfigGetter, configMapName string) (*ManagedControlPlaneReconciler, error) {
 	if configGetter == nil {
 		return nil, fmt.Errorf("managed control plane config getter must not be nil")
 	}
@@ -60,7 +66,7 @@ func NewManagedControlPlaneReconciler(platformCluster *clusters.Cluster, onboard
 
 type ManagedControlPlaneReconciler struct {
 	PlatformCluster   *clusters.Cluster
-	OnboardingCluster *clusters.Cluster
+	OnboardingCluster OnboardingCluster
 	GetConfigFunc     config.ManagedControlPlaneConfigGetter
 	ConfigMapName     string
 	eventRecorder     events.EventRecorder

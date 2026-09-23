@@ -7,6 +7,7 @@
 - [ControlPlane](controller/controlplane.md)
 - [Deployment Controllers](controller/deployment.md)
 - [HelmDeployer](controller/helmdeployer.md)
+- [KCP Workspace Mode](controller/kcp-workspace-mode.md)
 - [Cluster Scheduler](controller/scheduler.md)
 
 ## Libraries

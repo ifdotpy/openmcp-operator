@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -51,7 +52,10 @@ func (r *ManagedControlPlaneReconciler) deleteDependingServices(ctx context.Cont
 			res.SetName(mcp.Name)
 			res.SetNamespace(mcp.Namespace)
 			if err := r.OnboardingCluster.Client().Get(ctx, client.ObjectKeyFromObject(res), res); err != nil {
-				if !apierrors.IsNotFound(err) {
+				// In the multicluster (kcp) mode a tenant workspace only serves the
+				// APIs it has bound: an unbound service API cannot hold instances,
+				// so a missing kind means "no service resources", not an error.
+				if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 					errs.Append(errutils.WithReason(fmt.Errorf("error getting service resource [%s.%s] '%s/%s' for ServiceProvider '%s': %w", res.GetKind(), res.GetAPIVersion(), res.GetNamespace(), res.GetName(), sp.Name, err), cconst.ReasonOnboardingClusterInteractionProblem))
 				}
 				continue

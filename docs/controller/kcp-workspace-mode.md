@@ -1,0 +1,32 @@
+# KCP Workspace Mode
+
+KCP workspace mode watches one `APIExportEndpointSlice`. Each engaged KCP workspace becomes one open control plane.
+
+The operator currently contains a small discovery adapter between KCP's `APIExportEndpointSlice` API and `multicluster-runtime`. The released `kcp-dev/multicluster-provider` v0.8.0 uses controller-runtime v0.24, while openmcp-operator uses v0.25. Replace this adapter with the upstream provider after a controller-runtime v0.25 compatible release is available. The adapter only discovers engaged workspaces.
+
+The mode depends only on KCP APIs and these lifecycle signals:
+
+- APIExport engagement starts the workspace runtime.
+- The matching `APIBinding` owns workspace-local bootstrap and access objects.
+- APIExport disengagement removes the host runtime after the cleanup delay.
+
+The operator creates `ControlPlane/default` in the engaged workspace. The ControlPlane controller creates its normal host namespace, `ClusterRequest`, and `AccessRequest`. The workspace runtime registers the same workspace as the single `mcp` cluster, grants only requests owned by the ControlPlane controller, and issues bounded credentials scoped to that workspace. It does not create a nested Kubernetes cluster.
+
+Enable the mode with these flags:
+
+```text
+--kcp-endpoint-slice=<APIExportEndpointSlice name>
+--kcp-kubeconfig=<provider workspace kubeconfig>
+```
+
+The operator reads the export reference from the endpoint slice and finds the matching `APIBinding` in each workspace. Use the optional `--kcp-binding-name` flag only to prefer a stable binding name when one exists.
+
+The optional runtime flags control reconciliation, cleanup, and credential duration:
+
+```text
+--kcp-workspace-reconcile-interval=5s
+--kcp-workspace-cleanup-delay=1m
+--kcp-workspace-token-lifetime=1h
+```
+
+Service-provider placement is deliberately outside this mode. A KCP workspace serves APIs but has no Kubernetes workload APIs such as `Deployment` or `Service`. A provider that installs controllers must choose a workload cluster independently and use the ControlPlane credential to address the account workspace. This keeps the operator's KCP support independent of any product-specific provider or hosting platform.
