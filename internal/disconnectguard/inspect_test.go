@@ -19,10 +19,11 @@ func TestInspectAllNamespacesAndWorkspaceDeletion(t *testing.T) {
 	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("ExampleList"), &unstructured.UnstructuredList{})
 	for _, tc := range []struct {
-		name                                 string
-		order, deleting, resolveError, allow bool
+		name                                             string
+		order, deleting, resolveError, noServices, allow bool
 	}{
 		{name: "empty", allow: true},
+		{name: "no configured services", noServices: true, allow: true},
 		{name: "custom namespace", order: true},
 		{name: "workspace deletion", order: true, deleting: true, allow: true},
 		{name: "unknown binding", resolveError: true},
@@ -43,6 +44,9 @@ func TestInspectAllNamespacesAndWorkspaceDeletion(t *testing.T) {
 				}
 				return c, tc.deleting, nil
 			}}
+			if tc.noServices {
+				i.Services = nil
+			}
 			if err := i.Check(context.Background(), "workspace", "services", "uid"); (err == nil) != tc.allow {
 				t.Fatalf("unexpected result %v", err)
 			}

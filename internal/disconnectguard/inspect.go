@@ -14,13 +14,15 @@ import (
 // The boolean is true only when the workspace has a deletion timestamp.
 type Resolve func(context.Context, string, string, types.UID) (client.Client, bool, error)
 
+// Inspector checks configured services after Resolve verifies the workspace.
+// Resolve can also inspect persisted services for providers removed from configuration.
 type Inspector struct {
 	Resolve  Resolve
 	Services []schema.GroupVersionKind
 }
 
 func (i Inspector) Check(ctx context.Context, cluster, name string, uid types.UID) error {
-	if i.Resolve == nil || len(i.Services) == 0 {
+	if i.Resolve == nil {
 		return fmt.Errorf("disconnect guard is not configured")
 	}
 	workspace, deleting, err := i.Resolve(ctx, cluster, name, uid)
