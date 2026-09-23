@@ -48,48 +48,29 @@ func (r *workspaceRuntime) ownsWorkspaceRequest(manager string) bool {
 	return false
 }
 func (r *workspaceRuntime) ensureWorkspaceProviders(ctx context.Context, namespace string) error {
-
-	desiredProviders := make(map[string]struct{}, len(r.providers))
-	desiredRBAC := make(map[string]struct{}, len(r.providers))
 	for _, provider := range r.providers {
-		desiredProviders[provider.Name] = struct{}{}
 		serviceAccount := providerRuntimeRBACName(namespace, provider.Name)
-		desiredRBAC[serviceAccount] = struct{}{}
 		if err := r.ensureProviderRBAC(ctx, namespace, serviceAccount, provider); err != nil {
 			return err
+		}
+		if provider.RegistrationNamespace != "" {
+			continue
 		}
 		if err := r.ensureProviderDeployment(ctx, namespace, serviceAccount, provider); err != nil {
 			return err
 		}
 	}
-	if err := r.pruneProviderRuntime(ctx, namespace, desiredProviders, desiredRBAC); err != nil {
-		return err
-	}
 	return nil
 }
 
 func (r *workspaceRuntime) reconcileServiceProviders(ctx context.Context) error {
-	desired := make(map[string]struct{}, len(r.providers))
 	for _, provider := range r.providers {
-		desired[provider.ProviderName] = struct{}{}
 		if err := r.ensureServiceProvider(ctx, provider); err != nil {
 			return err
 		}
 	}
-
-	providers := &providerv1alpha1.ServiceProviderList{}
-	if err := r.platform.Client().List(ctx, providers, client.MatchingLabels{workspaceProviderLabel: labelValueTrue}); err != nil {
-		return fmt.Errorf("list workspace ServiceProviders: %w", err)
-	}
-	for i := range providers.Items {
-		provider := &providers.Items[i]
-		if _, keep := desired[provider.Name]; keep {
-			continue
-		}
-		if err := r.platform.Client().Delete(ctx, provider); client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("delete stale workspace ServiceProvider %q: %w", provider.Name, err)
-		}
-	}
+	// Retain old resource descriptors so restarted runtimes can wait for service
+	// finalizers before revoking access. Native provisioning ignores these objects.
 	return nil
 }
 
@@ -131,10 +112,16 @@ func providerRuntimeRBACName(namespace, provider string) string {
 func (r *workspaceRuntime) ensureProviderRBAC(ctx context.Context, namespace, name string, provider workspaceProvider) error {
 	c := r.platform.Client()
 	labels := []clusteraccess.Label{{Key: workspaceRuntimeLabel, Value: namespace}, {Key: appNameLabel, Value: provider.Name}}
-	if _, err := clusteraccess.EnsureServiceAccount(ctx, c, name, namespace, labels...); err != nil {
-		return fmt.Errorf("ensure provider ServiceAccount: %w", err)
+	if provider.RegistrationNamespace == "" {
+		if _, err := clusteraccess.EnsureServiceAccount(ctx, c, name, namespace, labels...); err != nil {
+			return fmt.Errorf("ensure provider ServiceAccount: %w", err)
+		}
 	}
 	subjects := []rbacv1.Subject{{Kind: serviceAccountKind, Name: name, Namespace: namespace}}
+	if provider.RegistrationNamespace != "" {
+		subjects[0].Name = provider.Name
+		subjects[0].Namespace = provider.RegistrationNamespace
+	}
 	rules := append([]rbacv1.PolicyRule{
 		{APIGroups: []string{clustersv1alpha1.GroupVersion.Group}, Resources: []string{"clusters", "clusterrequests", "clusterrequests/status", "accessrequests", "accessrequests/status"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},
 		{APIGroups: []string{""}, Resources: []string{"secrets", "configmaps", "events"}, Verbs: []string{verbGet, verbList, verbWatch, verbCreate, verbUpdate, verbPatch, verbDelete}},

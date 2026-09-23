@@ -24,7 +24,6 @@ import (
 
 	clustersv1alpha1 "github.com/openmcp-project/openmcp-operator/api/clusters/v1alpha1"
 	commonapi "github.com/openmcp-project/openmcp-operator/api/common"
-	apiconst "github.com/openmcp-project/openmcp-operator/api/constants"
 )
 
 const workspaceAccessOwnerLabel = "workspace.openmcp.cloud/access-uid"
@@ -33,7 +32,11 @@ func workspaceAccessNamespace(ar *clustersv1alpha1.AccessRequest) string {
 	return "openmcp-access-" + string(ar.UID)
 }
 
-func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespace string, workspaceClient client.Client, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference) error {
+func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespace string, workspaceClient client.Client, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference, retained map[string]bool) error {
+	return r.reconcileAccessRequestsWithMode(ctx, namespace, workspaceClient, workspaceConfig, bindingOwner, retained, false)
+}
+
+func (r *workspaceRuntime) reconcileAccessRequestsWithMode(ctx context.Context, namespace string, workspaceClient client.Client, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference, retained map[string]bool, deletingOnly bool) error {
 	platform := r.platform.Client()
 	list := &clustersv1alpha1.AccessRequestList{}
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -41,21 +44,17 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 	}
 	for i := range list.Items {
 		ar := &list.Items[i]
-		if !r.ownsWorkspaceRequest(ar.Labels[apiconst.ManagedByLabel]) {
+		if deletingOnly && ar.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if skip, err := r.retireWorkspaceRequest(ctx, ar, workspaceAccessFinalizer, retained); err != nil {
+			return err
+		} else if skip {
 			continue
 		}
 		if !ar.DeletionTimestamp.IsZero() {
-			if !controllerutil.ContainsFinalizer(ar, workspaceAccessFinalizer) {
-				continue
-			}
-			done, err := revokeWorkspaceAccess(ctx, workspaceClient, ar)
-			if err != nil {
+			if err := r.finalizeWorkspaceAccess(ctx, workspaceClient, ar); err != nil {
 				return err
-			}
-			if done && controllerutil.RemoveFinalizer(ar, workspaceAccessFinalizer) {
-				if err := platform.Update(ctx, ar); err != nil && !apierrors.IsNotFound(err) {
-					return err
-				}
 			}
 			continue
 		}
@@ -459,4 +458,32 @@ func (r *workspaceRuntime) cleanupWorkspaceAccess(name multicluster.ClusterName,
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("remove workspace control-plane namespace %q: %w", workspaceNamespace.Name, err))
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+// deleteWorkspaceCredential removes only the credential controlled by this request.
+func (r *workspaceRuntime) deleteWorkspaceCredential(ctx context.Context, ar *clustersv1alpha1.AccessRequest) error {
+	secret := &corev1.Secret{}
+	c := r.platform.Client()
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ar.Namespace, Name: ar.Name + "-kubeconfig"}, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(secret, ar) {
+		return nil
+	}
+	return client.IgnoreNotFound(c.Delete(ctx, secret))
+}
+
+func (r *workspaceRuntime) finalizeWorkspaceAccess(ctx context.Context, workspaceClient client.Client, ar *clustersv1alpha1.AccessRequest) error {
+	if !controllerutil.ContainsFinalizer(ar, workspaceAccessFinalizer) {
+		return nil
+	}
+	done, err := revokeWorkspaceAccess(ctx, workspaceClient, ar)
+	if err != nil || !done {
+		return err
+	}
+	if err := r.deleteWorkspaceCredential(ctx, ar); err != nil {
+		return err
+	}
+	controllerutil.RemoveFinalizer(ar, workspaceAccessFinalizer)
+	return client.IgnoreNotFound(r.platform.Client().Update(ctx, ar))
 }

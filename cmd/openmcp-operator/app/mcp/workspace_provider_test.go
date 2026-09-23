@@ -18,12 +18,17 @@ func TestLoadWorkspaceProviders(t *testing.T) {
     "clusterRoleRules": [{"apiGroups": ["services.example.io"], "resources": ["providerconfigs"], "verbs": ["get", "list", "watch"]}]
   }
 ]`
+	shared := strings.Replace(valid, `"image":`, `"registrationNamespace": "shared", "image":`, 1)
+	second := strings.ReplaceAll(shared, "example-provider", "another-provider")
+	second = strings.ReplaceAll(second, "example-config", "another-config")
 	for _, tc := range []struct {
 		name, input, problem string
 		count                int
 	}{
 		{name: "empty path", count: 0},
 		{name: "valid", input: valid, count: 1},
+		{name: "shared", input: shared, count: 1},
+		{name: "duplicate registration namespace", input: shared[:len(shared)-1] + "," + second[1:], problem: "registration namespace"},
 		{name: "unknown field", input: strings.Replace(valid, `"image":`, `"unexpected": true, "image":`, 1), problem: "unknown field"},
 		{name: "duplicate deployment name", input: valid[:len(valid)-1] + "," + valid[1:], problem: "duplicated"},
 		{name: "missing resource kind", input: strings.Replace(valid, `, "kind": "Example"`, "", 1), problem: "incomplete resource GVK"},

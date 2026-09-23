@@ -13,13 +13,14 @@ import (
 )
 
 type workspaceProvider struct {
-	Args             []string                `json:"args,omitempty"`
-	Name             string                  `json:"name"`
-	Image            string                  `json:"image"`
-	ProviderName     string                  `json:"providerName"`
-	Resource         metav1.GroupVersionKind `json:"resource"`
-	RoleRules        []rbacv1.PolicyRule     `json:"roleRules,omitempty"`
-	ClusterRoleRules []rbacv1.PolicyRule     `json:"clusterRoleRules,omitempty"`
+	RegistrationNamespace string                  `json:"registrationNamespace,omitempty"`
+	Args                  []string                `json:"args,omitempty"`
+	Name                  string                  `json:"name"`
+	Image                 string                  `json:"image"`
+	ProviderName          string                  `json:"providerName"`
+	Resource              metav1.GroupVersionKind `json:"resource"`
+	RoleRules             []rbacv1.PolicyRule     `json:"roleRules,omitempty"`
+	ClusterRoleRules      []rbacv1.PolicyRule     `json:"clusterRoleRules,omitempty"`
 }
 
 func loadWorkspaceProviders(path string) ([]workspaceProvider, error) {
@@ -46,6 +47,7 @@ func loadWorkspaceProviders(path string) ([]workspaceProvider, error) {
 
 	names := map[string]struct{}{}
 	providerNames := map[string]struct{}{}
+	registrationNamespaces := map[string]bool{}
 	for i := range providers {
 		provider := &providers[i]
 		if problems := validation.IsDNS1123Subdomain(provider.Name); len(problems) > 0 {
@@ -55,6 +57,15 @@ func loadWorkspaceProviders(path string) ([]workspaceProvider, error) {
 			return nil, fmt.Errorf("service provider name %q is duplicated", provider.Name)
 		}
 		names[provider.Name] = struct{}{}
+		if provider.RegistrationNamespace != "" {
+			if registrationNamespaces[provider.RegistrationNamespace] {
+				return nil, fmt.Errorf("registration namespace %q is duplicated", provider.RegistrationNamespace)
+			}
+			registrationNamespaces[provider.RegistrationNamespace] = true
+			if problems := validation.IsDNS1123Label(provider.RegistrationNamespace); len(problems) > 0 {
+				return nil, fmt.Errorf("invalid registration namespace: %s", problems[0])
+			}
+		}
 		if provider.Image == "" {
 			return nil, fmt.Errorf("service provider %q has no image", provider.Name)
 		}

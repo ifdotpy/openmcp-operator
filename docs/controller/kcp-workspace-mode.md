@@ -31,6 +31,12 @@ The optional runtime flags control reconciliation, cleanup, and credential durat
 
 Optional per-workspace provider deployments are configured with `--kcp-service-providers=<JSON file>`. The operator creates a dedicated ServiceAccount and RBAC for each deployment and removes them when the workspace runtime is removed. The configuration supplies the provider image, resource GVK, additional arguments, and required RBAC. No particular provider is built into the operator.
 
+Removing a provider from the configuration starts retirement. The operator keeps its existing runtime, access, and shared registrations while any service object remains, including objects with deletion finalizers. It does not delete service objects. After all services are gone, it revokes the ClusterRequests, AccessRequests, credentials, and tenant grants previously owned by the workspace runtime. Runtime resources remain until request finalizers finish. Requests owned by other controllers are preserved.
+
+The operator still completes request deletion initiated by a service provider. Providers delete their requests before removing the service finalizer. After APIExport disengagement, cleanup finalizes requests already marked for deletion while it keeps active requests and the provider runtime.
+
+ServiceProvider resource descriptors remain on the platform cluster so retirement can continue after an operator restart. Keep the service APIs available until retirement completes. Missing descriptors or unreadable service APIs stop cleanup. Restore the provider configuration if its runtime was already removed; descriptors alone cannot recreate deployment configuration.
+
 Service-controller placement remains the responsibility of each provider. A KCP workspace serves APIs but has no Kubernetes workload APIs such as `Deployment` or `Service`. A provider that installs controllers must choose a Kubernetes cluster independently and use the ControlPlane credential to address the KCP workspace. This keeps the operator's KCP support independent of any product-specific provider or hosting platform.
 
 Example provider configuration (RBAC rules depend on the provider):
@@ -60,3 +66,24 @@ service objects still exist. Enable it with `--kcp-disconnect-guard-address`,
 `--kcp-disconnect-guard-key`. Use `--kcp-disconnect-guard-ca` for a private CA.
 The guard inspects all namespaces and fails closed when inspection fails. Deleting
 the entire workspace remains permitted so its normal cleanup can proceed.
+
+### Shared service providers
+
+Set `registrationNamespace` on a provider entry to use an externally deployed,
+shared provider instead of one provider Deployment per workspace. Deploy its
+ServiceAccount with the configured provider `name` in that namespace. The operator
+binds that account to the tenant runtime namespace and publishes a labelled
+onboarding kubeconfig Secret in the registration namespace. The credential grants
+access to the configured service API group in that workspace.
+
+Each registration Secret is named after the globally unique onboarding namespace.
+The shared provider uses the kubeconfig provider from multicluster-runtime and must
+reject service objects outside that registered namespace. This preserves existing
+platform-side access identities when switching deployment modes. Credential updates
+are propagated to the registration Secret. Its owner is the tenant runtime Namespace;
+removing that Namespace also removes the registration through garbage collection.
+Service deletion must finish before the workspace and its registration are removed.
+
+Shared provider deployments and their registration namespaces are managed by the
+installation, not by this operator. Managed service controllers can still run per
+tenant; sharing a service provider does not share the managed service instance.
