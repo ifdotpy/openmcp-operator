@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openmcp-project/controller-utils/pkg/clusteraccess"
@@ -38,6 +39,7 @@ func (r *workspaceRuntime) reconcileAccessRequests(ctx context.Context, namespac
 
 func (r *workspaceRuntime) reconcileAccessRequestsWithMode(ctx context.Context, namespace string, workspaceClient client.Client, workspaceConfig *rest.Config, bindingOwner metav1.OwnerReference, retained map[string]bool, deletingOnly bool) error {
 	platform := r.platform.Client()
+	var pending error
 	list := &clustersv1alpha1.AccessRequestList{}
 	if err := platform.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return fmt.Errorf("list AccessRequests: %w", err)
@@ -54,6 +56,10 @@ func (r *workspaceRuntime) reconcileAccessRequestsWithMode(ctx context.Context, 
 		}
 		if !ar.DeletionTimestamp.IsZero() {
 			if err := r.finalizeWorkspaceAccess(ctx, workspaceClient, ar); err != nil {
+				if deletingOnly && errors.Is(err, errCleanupServicesRemain) {
+					pending = errors.Join(pending, err)
+					continue
+				}
 				return err
 			}
 			continue
@@ -76,60 +82,79 @@ func (r *workspaceRuntime) reconcileAccessRequestsWithMode(ctx context.Context, 
 		if !resolved {
 			continue
 		}
-		if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, bindingOwner); err != nil {
+		provider, cleanup, err := r.cleanupProviderForRequest(ctx, ar)
+		if err != nil {
 			return err
 		}
-		secretName := ar.Name + "-kubeconfig"
-		secret := &corev1.Secret{}
-		err = platform.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
-		rotate := apierrors.IsNotFound(err)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-		if err == nil {
-			expires, parseErr := time.Parse(time.RFC3339, string(secret.Data[clustersv1alpha1.SecretKeyExpirationTimestamp]))
-			rotate = parseErr != nil || time.Until(expires) < r.tokenLifetime/3
-		}
-		if rotate {
-			issuerToken, err := workspaceIssuerToken(ctx, workspaceClient, ar)
-			if err != nil {
+		if cleanup {
+			if err := r.reconcileCleanupAccess(ctx, workspaceClient, workspaceConfig, ar, provider, bindingOwner); err != nil {
 				return err
 			}
-			clientsetForConfig := r.clientsetForConfig
-			if clientsetForConfig == nil {
-				clientsetForConfig = func(config *rest.Config) (kubernetes.Interface, error) {
-					return kubernetes.NewForConfig(config)
-				}
-			}
-			workspaceClientset, err := clientsetForConfig(workspaceIssuerConfig(workspaceConfig, issuerToken))
-			if err != nil {
-				return fmt.Errorf("create workspace credential issuer client: %w", err)
-			}
-			kubeconfig, expires, err := mintWorkspaceCredential(ctx, workspaceClientset, workspaceConfig, ar, r.tokenLifetime)
-			if err != nil {
-				return fmt.Errorf("mint workspace credential for %s: %w", ar.Name, err)
-			}
-			secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace}}
-			if _, err := controllerutil.CreateOrUpdate(ctx, platform, secret, func() error {
-				secret.Type = corev1.SecretTypeOpaque
-				secret.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ar, clustersv1alpha1.GroupVersion.WithKind("AccessRequest"))}
-				secret.Data = map[string][]byte{
-					clustersv1alpha1.SecretKeyKubeconfig:          kubeconfig,
-					clustersv1alpha1.SecretKeyExpirationTimestamp: []byte(expires.UTC().Format(time.RFC3339)),
-					clustersv1alpha1.SecretKeyCreationTimestamp:   []byte(time.Now().UTC().Format(time.RFC3339)),
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
+			continue
 		}
-		old := ar.DeepCopy()
-		ar.Status.Phase = clustersv1alpha1.REQUEST_GRANTED
-		ar.Status.ObservedGeneration = ar.Generation
-		ar.Status.SecretRef = &commonapi.LocalObjectReference{Name: secretName}
-		if err := platform.Status().Patch(ctx, ar, client.MergeFrom(old)); err != nil {
+		if err := r.reconcileLocalWorkspaceAccess(ctx, workspaceClient, workspaceConfig, ar, bindingOwner); err != nil {
 			return err
 		}
+	}
+	return pending
+}
+
+func (r *workspaceRuntime) reconcileLocalWorkspaceAccess(ctx context.Context, workspaceClient client.Client, workspaceConfig *rest.Config, ar *clustersv1alpha1.AccessRequest, bindingOwner metav1.OwnerReference) error {
+	platform := r.platform.Client()
+	namespace := ar.Namespace
+	if err := ensureWorkspaceAccess(ctx, workspaceClient, ar, bindingOwner); err != nil {
+		return err
+	}
+	secretName := ar.Name + "-kubeconfig"
+	secret := &corev1.Secret{}
+	err := platform.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, secret)
+	rotate := apierrors.IsNotFound(err)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err == nil {
+		expires, parseErr := time.Parse(time.RFC3339, string(secret.Data[clustersv1alpha1.SecretKeyExpirationTimestamp]))
+		rotate = parseErr != nil || time.Until(expires) < r.tokenLifetime/3
+	}
+	if rotate {
+		issuerToken, err := workspaceIssuerToken(ctx, workspaceClient, ar)
+		if err != nil {
+			return err
+		}
+		clientsetForConfig := r.clientsetForConfig
+		if clientsetForConfig == nil {
+			clientsetForConfig = func(config *rest.Config) (kubernetes.Interface, error) {
+				return kubernetes.NewForConfig(config)
+			}
+		}
+		workspaceClientset, err := clientsetForConfig(workspaceIssuerConfig(workspaceConfig, issuerToken))
+		if err != nil {
+			return fmt.Errorf("create workspace credential issuer client: %w", err)
+		}
+		kubeconfig, expires, err := mintWorkspaceCredential(ctx, workspaceClientset, workspaceConfig, ar, r.tokenLifetime)
+		if err != nil {
+			return fmt.Errorf("mint workspace credential for %s: %w", ar.Name, err)
+		}
+		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace}}
+		if _, err := controllerutil.CreateOrUpdate(ctx, platform, secret, func() error {
+			secret.Type = corev1.SecretTypeOpaque
+			secret.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ar, clustersv1alpha1.GroupVersion.WithKind("AccessRequest"))}
+			secret.Data = map[string][]byte{
+				clustersv1alpha1.SecretKeyKubeconfig:          kubeconfig,
+				clustersv1alpha1.SecretKeyExpirationTimestamp: []byte(expires.UTC().Format(time.RFC3339)),
+				clustersv1alpha1.SecretKeyCreationTimestamp:   []byte(time.Now().UTC().Format(time.RFC3339)),
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	old := ar.DeepCopy()
+	ar.Status.Phase = clustersv1alpha1.REQUEST_GRANTED
+	ar.Status.ObservedGeneration = ar.Generation
+	ar.Status.SecretRef = &commonapi.LocalObjectReference{Name: secretName}
+	if err := platform.Status().Patch(ctx, ar, client.MergeFrom(old)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -431,7 +456,7 @@ func (r *workspaceRuntime) cleanupWorkspaceAccess(name multicluster.ClusterName,
 		}
 		for _, item := range items {
 			obj := item.(client.Object)
-			if _, ok := obj.GetLabels()[workspaceAccessOwnerLabel]; !ok {
+			if owner, ok := obj.GetLabels()[workspaceAccessOwnerLabel]; !ok || strings.HasPrefix(owner, "broker-") {
 				continue
 			}
 			if err := c.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
@@ -476,6 +501,18 @@ func (r *workspaceRuntime) deleteWorkspaceCredential(ctx context.Context, ar *cl
 func (r *workspaceRuntime) finalizeWorkspaceAccess(ctx context.Context, workspaceClient client.Client, ar *clustersv1alpha1.AccessRequest) error {
 	if !controllerutil.ContainsFinalizer(ar, workspaceAccessFinalizer) {
 		return nil
+	}
+	if r.cleanupClient != nil {
+		handled, err := r.finalizeCleanupAccess(ctx, ar)
+		if err != nil {
+			return err
+		}
+		if handled {
+			if _, err := revokeWorkspaceAccess(ctx, workspaceClient, ar); err != nil {
+				return err
+			}
+			return r.releaseCleanupAccessRequest(ctx, ar)
+		}
 	}
 	done, err := revokeWorkspaceAccess(ctx, workspaceClient, ar)
 	if err != nil || !done {

@@ -48,6 +48,12 @@ const (
 )
 
 type workspaceRuntime struct {
+	cleanupClient      client.Client
+	cleanupConfig      *rest.Config
+	cleanupCluster     string
+	cleanupBrokerUser  string
+	cleanupMu          sync.Mutex
+	cleanupNewClient   func(*rest.Config, client.Options) (client.Client, error)
 	disconnectGuard    *workspaceDisconnectGuard
 	log                logging.Logger
 	platform           *controllerclusters.Cluster
@@ -70,8 +76,26 @@ type workspaceRuntime struct {
 var _ multicluster.Aware = (*workspaceRuntime)(nil)
 
 func (r *workspaceRuntime) Start(ctx context.Context) error {
-	<-ctx.Done()
-	return nil
+	if r.cleanupClient == nil {
+		<-ctx.Done()
+		return nil
+	}
+	interval := r.reconcileInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if err := r.reconcileCleanupRecords(ctx); err != nil && ctx.Err() == nil {
+			r.log.Error(err, "cleanup broker reconciliation failed")
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *workspaceRuntime) Engage(ctx context.Context, name multicluster.ClusterName, cl cluster.Cluster) error {
@@ -395,18 +419,13 @@ func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multiclust
 	if err != nil {
 		return err
 	}
-	if err := r.reconcileClusterRequestsWithMode(ctx, runtimeNamespace, nil, true); err != nil {
-		return err
-	}
-	if err := r.reconcileAccessRequestsWithMode(ctx, runtimeNamespace, workspaceClient, nil, metav1.OwnerReference{}, nil, true); err != nil {
-		return err
-	}
 	retained, err := r.retainedProviderManagers(ctx, workspaceClient)
 	if err != nil {
 		return err
 	}
+	var waiting error
 	if len(retained) != 0 {
-		return fmt.Errorf("waiting for retired provider services to finish deletion")
+		waiting = fmt.Errorf("waiting for retired provider services to finish deletion")
 	}
 	// Providers own service finalizers. Keep their runtime and credentials until
 	// every service is gone, including during deletion of the whole workspace.
@@ -418,8 +437,20 @@ func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multiclust
 			return fmt.Errorf("check remaining %s services: %w", gvk.Kind, err)
 		}
 		if len(services.Items) != 0 {
-			return fmt.Errorf("waiting for %s services to finish deletion", gvk.Kind)
+			if err := r.cleanupProvidersReady(ctx, runtimeNamespace, true); err != nil {
+				return err
+			}
+			waiting = fmt.Errorf("waiting for %s services to finish deletion", gvk.Kind)
 		}
+	}
+	if err := r.reconcileClusterRequestsWithMode(ctx, runtimeNamespace, nil, true); err != nil {
+		return err
+	}
+	if err := r.reconcileAccessRequestsWithMode(ctx, runtimeNamespace, workspaceClient, nil, metav1.OwnerReference{}, nil, true); err != nil {
+		return err
+	}
+	if waiting != nil {
+		return waiting
 	}
 	if err := r.cleanupWorkspaceRuntime(ctx, name); err != nil {
 		return err

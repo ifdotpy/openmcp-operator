@@ -30,6 +30,7 @@ import (
 	"github.com/openmcp-project/openmcp-operator/internal/config"
 	"github.com/openmcp-project/openmcp-operator/internal/controllers/controlplane"
 	"github.com/openmcp-project/openmcp-operator/internal/disconnectguard"
+	libutils "github.com/openmcp-project/openmcp-operator/lib/utils"
 )
 
 // runMulticluster runs the ControlPlane controller in KCP workspace mode.
@@ -131,22 +132,6 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		return fmt.Errorf("unable to create ManagedControlPlane reconciler: %w", err)
 	}
 
-	err = mcbuilder.ControllerManagedBy(mcMgr).
-		Named(controlplane.ControllerName).
-		For(&corev2alpha1.ControlPlane{}).
-		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-			cl, err := mcMgr.GetCluster(ctx, req.ClusterName)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			// Bind a shallow copy of the reconciler to the engaged workspace.
-			rc := mcpRec.ForCluster(cl)
-			return rc.Reconcile(ctx, req.Request)
-		}))
-	if err != nil {
-		return fmt.Errorf("unable to build multicluster controller: %w", err)
-	}
-
 	// One runtime is created dynamically for every workspace that binds the APIExport.
 	// It registers the workspace itself as the MCP cluster and resolves only the
 	// ClusterRequest and AccessRequest resources owned by the ControlPlane or configured providers.
@@ -162,9 +147,50 @@ func (o *RunOptions) runMulticluster(ctx context.Context, setupLog logging.Logge
 		tokenLifetime:      o.KCPWorkspaceTokenLifetime,
 		consumerBaseConfig: cfg,
 	}
+	if err := runtime.configureCleanupBroker(ctx, discoveryClient, cfg); err != nil {
+		return fmt.Errorf("configure permanent cleanup broker: %w", err)
+	}
 	if err := runtime.reconcileServiceProviders(ctx); err != nil {
 		return err
 	}
+
+	err = mcbuilder.ControllerManagedBy(mcMgr).
+		Named(controlplane.ControllerName).
+		For(&corev2alpha1.ControlPlane{}).
+		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+			cl, err := mcMgr.GetCluster(ctx, req.ClusterName)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			// Provision only after durable cleanup access has passed authorization.
+			controlPlane := &corev2alpha1.ControlPlane{}
+			if err := cl.GetClient().Get(ctx, req.NamespacedName, controlPlane); err != nil {
+				return ctrl.Result{}, client.IgnoreNotFound(err)
+			}
+			if controlPlane.DeletionTimestamp.IsZero() {
+				workspaceConfig, err := runtime.consumerWorkspaceConfig(req.ClusterName, cl.GetConfig())
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if err := runtime.reconcile(ctx, req.ClusterName, cl.GetClient(), workspaceConfig); err != nil {
+					return ctrl.Result{}, err
+				}
+				namespace, err := libutils.StableMCPNamespace(defaultControlPlaneName, workspaceControlPlaneNamespace(req.ClusterName))
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if err := runtime.cleanupProvidersReady(ctx, namespace, false); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			// Bind a shallow copy of the reconciler to the engaged workspace.
+			rc := mcpRec.ForCluster(cl)
+			return rc.Reconcile(ctx, req.Request)
+		}))
+	if err != nil {
+		return fmt.Errorf("unable to build multicluster controller: %w", err)
+	}
+
 	if o.KCPDisconnectGuardAddress != "" {
 		var ca []byte
 		if o.KCPDisconnectGuardCA != "" {
