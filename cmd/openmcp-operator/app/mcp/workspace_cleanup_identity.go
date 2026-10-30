@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kcp-dev/logicalcluster/v3"
 	kcpapisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	kcpcorev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	authv1 "k8s.io/api/authentication/v1"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -93,12 +95,31 @@ func (r *workspaceRuntime) configureCleanupBroker(ctx context.Context, c client.
 	if err != nil {
 		return fmt.Errorf("read broker identity: %w", err)
 	}
-	if identity.Status.UserInfo.Username == "" {
-		return fmt.Errorf("broker identity is empty")
+	brokerUser, err := cleanupBrokerUsername(identity.Status.UserInfo)
+	if err != nil {
+		return err
 	}
-	r.cleanupBrokerUser = identity.Status.UserInfo.Username
+	r.cleanupBrokerUser = brokerUser
 	r.cleanupClient, r.cleanupConfig, r.cleanupCluster = c, rest.CopyConfig(cfg), name
 	return nil
+}
+
+// KCP authenticates a ServiceAccount with its local username. Foreign workspace
+// RBAC matches the global username from EffectiveUsers instead.
+func cleanupBrokerUsername(identity authv1.UserInfo) (string, error) {
+	if identity.Username == "" {
+		return "", fmt.Errorf("broker identity is empty")
+	}
+	const localPrefix = "system:serviceaccount:"
+	if !strings.HasPrefix(identity.Username, localPrefix) {
+		return identity.Username, nil
+	}
+	parts := strings.Split(strings.TrimPrefix(identity.Username, localPrefix), ":")
+	origins := identity.Extra["authentication.kcp.io/cluster-name"]
+	if len(parts) != 2 || len(validation.IsDNS1123Label(parts[0])) != 0 || len(validation.IsDNS1123Subdomain(parts[1])) != 0 || len(origins) != 1 || !logicalcluster.Name(origins[0]).IsValid() {
+		return "", fmt.Errorf("ServiceAccount broker requires one authenticated KCP origin and a valid local username")
+	}
+	return fmt.Sprintf("system:kcp:serviceaccount:%s:%s:%s", origins[0], parts[0], parts[1]), nil
 }
 
 // Only account-wide service permissions qualify. Namespace permissions and role

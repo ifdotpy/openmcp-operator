@@ -29,6 +29,9 @@ The patch requires the administrator to add them before rollout.
 
 Before it grants provider access, the operator creates one permanent broker User binding in each account.
 It uses the username returned by SelfSubjectReview.
+For a ServiceAccount broker, it converts that local username to the global KCP username.
+It uses the authenticated origin cluster from SelfSubjectReview extras, which can differ from the provider workspace.
+It rejects a missing or ambiguous ServiceAccount origin.
 The binding has no APIBinding owner.
 Its ClusterRole permits only:
 

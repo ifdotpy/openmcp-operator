@@ -59,6 +59,7 @@ type cleanupFixture struct {
 	events                    []string
 	tokens                    map[string]string
 	deny, failStatus          bool
+	brokerIdentity            authv1.UserInfo
 }
 
 func newCleanupFixture(t *testing.T) *cleanupFixture {
@@ -191,6 +192,10 @@ func (f *cleanupFixture) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	reject := func(code int, reason metav1.StatusReason) {
 		w.WriteHeader(code)
 		write(&metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: metav1.StatusFailure, Reason: reason, Message: req.Method + " " + req.URL.Path, Code: int32(code)})
+	}
+	if account == "provider" && token == "broker-token" && strings.HasSuffix(req.URL.Path, "/selfsubjectreviews") {
+		write(&authv1.SelfSubjectReview{TypeMeta: metav1.TypeMeta{APIVersion: "authentication.k8s.io/v1", Kind: "SelfSubjectReview"}, Status: authv1.SelfSubjectReviewStatus{UserInfo: f.brokerIdentity}})
+		return
 	}
 	if strings.HasSuffix(req.URL.Path, "/token") {
 		if token != "broker-token" {
@@ -722,5 +727,49 @@ func TestCleanupReadinessRetainsLegacyServices(t *testing.T) {
 	}
 	if err := f.r.cleanupProvidersReady(ctx, f.ar.Namespace, true); err == nil || !strings.Contains(err.Error(), "retain services") {
 		t.Fatalf("legacy service had no retained-state error: %v", err)
+	}
+}
+
+func TestCleanupBrokerUsesGlobalServiceAccountSubject(t *testing.T) {
+	f := newCleanupFixture(t)
+	ctx := context.Background()
+	logical := &kcpcorev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Name: kcpcorev1alpha1.LogicalClusterName, UID: "provider-workspace-uid", Annotations: map[string]string{"kcp.io/cluster": "provider"}}}
+	if err := f.issuer.Create(ctx, logical); err != nil {
+		t.Fatal(err)
+	}
+	f.brokerIdentity = authv1.UserInfo{Username: "system:serviceaccount:operator:broker", Extra: map[string]authv1.ExtraValue{"authentication.kcp.io/cluster-name": {"token-origin"}}}
+	if err := f.r.configureCleanupBroker(ctx, f.issuer, f.r.cleanupConfig); err != nil {
+		t.Fatal(err)
+	}
+	expected := "system:kcp:serviceaccount:token-origin:operator:broker"
+	if f.r.cleanupBrokerUser != expected {
+		t.Fatalf("broker uses %q instead of authenticated origin identity %q", f.r.cleanupBrokerUser, expected)
+	}
+	if err := f.r.ensureCleanupBrokerGrant(ctx, f.account, f.ar, testBindingOwner()); err != nil {
+		t.Fatal(err)
+	}
+	bindings := &rbacv1.ClusterRoleBindingList{}
+	if err := f.account.List(ctx, bindings); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(bindings.Items, func(binding rbacv1.ClusterRoleBinding) bool {
+		return slices.ContainsFunc(binding.Subjects, func(subject rbacv1.Subject) bool { return subject.Kind == "User" && subject.Name == expected })
+	}) {
+		t.Fatal("account grant lacks global broker identity")
+	}
+}
+
+func TestCleanupBrokerUsernameRejectsAmbiguousServiceAccountOrigin(t *testing.T) {
+	for _, origins := range []authv1.ExtraValue{nil, {}, {""}, {"one", "two"}, {"root:provider"}} {
+		identity := authv1.UserInfo{Username: "system:serviceaccount:operator:broker", Extra: map[string]authv1.ExtraValue{"authentication.kcp.io/cluster-name": origins}}
+		if _, err := cleanupBrokerUsername(identity); err == nil {
+			t.Fatalf("accepted ambiguous ServiceAccount origin %v", origins)
+		}
+	}
+	for _, username := range []string{"oidc-broker", "workload-broker"} {
+		got, err := cleanupBrokerUsername(authv1.UserInfo{Username: username})
+		if err != nil || got != username {
+			t.Fatalf("non-ServiceAccount broker changed: %q, %v", got, err)
+		}
 	}
 }
