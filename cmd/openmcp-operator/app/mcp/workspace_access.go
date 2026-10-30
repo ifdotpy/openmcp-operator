@@ -509,9 +509,6 @@ func (r *workspaceRuntime) finalizeWorkspaceAccess(ctx context.Context, workspac
 			return err
 		}
 		if handled {
-			if _, err := revokeWorkspaceAccess(ctx, workspaceClient, ar); err != nil {
-				return err
-			}
 			return r.releaseCleanupAccessRequest(ctx, ar)
 		}
 	}

@@ -448,6 +448,10 @@ func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multiclust
 			return err
 		}
 	}
+	brokerOnly, err := r.cleanupRequestsUseBroker(ctx, runtimeNamespace)
+	if err != nil {
+		return err
+	}
 	if err := r.reconcileClusterRequestsWithMode(ctx, runtimeNamespace, nil, true); err != nil {
 		return err
 	}
@@ -462,6 +466,9 @@ func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multiclust
 	}
 	if err := r.finalizeWorkspaceControlPlanes(ctx, name, workspaceClient); err != nil {
 		return err
+	}
+	if brokerOnly {
+		return nil
 	}
 	return r.cleanupWorkspaceAccess(name, workspaceClient)
 }

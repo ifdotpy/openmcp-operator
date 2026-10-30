@@ -539,11 +539,10 @@ func TestCleanupRevocationResumesWithoutRenewal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Phase != cleanupRevoking {
+	if record.Phase != cleanupGrantRetry || len(f.record.Data) != 1 {
 		t.Fatalf("failed revocation lost durable phase: %s", record.Phase)
 	}
 	before := len(f.tokens)
-	f.expire()
 	fail = false
 	fresh, _, _ := testRuntime(t)
 	fresh.platform = f.r.platform

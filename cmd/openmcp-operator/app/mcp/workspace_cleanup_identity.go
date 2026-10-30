@@ -43,13 +43,15 @@ import (
 var errCleanupServicesRemain = errors.New("cleanup services remain")
 
 const (
-	cleanupNamespace     = "openmcp-cleanup"
-	cleanupRecordLabel   = "workspace.openmcp.cloud/cleanup-record"
-	cleanupRecordKey     = "record"
-	cleanupActive        = "active"
-	cleanupDraining      = "draining"
-	cleanupRevoking      = "revoking"
-	cleanupServicesFinal = "services-final"
+	cleanupNamespace          = "openmcp-cleanup"
+	cleanupRecordLabel        = "workspace.openmcp.cloud/cleanup-record"
+	cleanupRecordKey          = "record"
+	cleanupActive             = "active"
+	cleanupDraining           = "draining"
+	cleanupRevoking           = "revoking"
+	cleanupServicesFinal      = "services-final"
+	cleanupGrantRetry         = "grant-retry"
+	cleanupCompleteAnnotation = "workspace.openmcp.cloud/cleanup-complete"
 )
 
 // cleanupRecord has no owner in the account or runtime namespace. The immutable
@@ -70,6 +72,15 @@ type cleanupRecord struct {
 
 func cleanupIdentityName(ar *clustersv1alpha1.AccessRequest) string {
 	return "cleanup-" + string(ar.UID)
+}
+
+func cleanupFinalPhase(phase string) bool {
+	switch phase {
+	case cleanupServicesFinal, cleanupRevoking, cleanupGrantRetry:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *workspaceRuntime) configureCleanupBroker(ctx context.Context, c client.Client, cfg *rest.Config) error {
@@ -260,7 +271,7 @@ func readCleanupRecord(secret *corev1.Secret) (*cleanupRecord, error) {
 		return nil, fmt.Errorf("invalid cleanup record %s", secret.Name)
 	}
 	switch record.Phase {
-	case cleanupActive, cleanupDraining, cleanupServicesFinal, cleanupRevoking:
+	case cleanupActive, cleanupDraining, cleanupServicesFinal, cleanupRevoking, cleanupGrantRetry:
 	default:
 		return nil, fmt.Errorf("unknown cleanup phase %q", record.Phase)
 	}
@@ -603,7 +614,7 @@ func (r *workspaceRuntime) reconcileCleanupRecord(ctx context.Context, secret *c
 	if err != nil {
 		return err
 	}
-	if record.Phase == cleanupServicesFinal || record.Phase == cleanupRevoking {
+	if cleanupFinalPhase(record.Phase) {
 		return r.revokeFinalCleanupRecord(ctx, account, secret, record)
 	}
 	logical := &kcpcorev1alpha1.LogicalCluster{}
@@ -696,7 +707,7 @@ func (r *workspaceRuntime) markCleanupServicesFinal(ctx context.Context, namespa
 		if err != nil {
 			return err
 		}
-		if record.Request.Namespace != namespace || record.Phase == cleanupServicesFinal || record.Phase == cleanupRevoking {
+		if record.Request.Namespace != namespace || cleanupFinalPhase(record.Phase) {
 			continue
 		}
 		if err := cleanupServicesGone(ctx, workspace, record); err != nil {
@@ -714,26 +725,20 @@ func (r *workspaceRuntime) markCleanupServicesFinal(ctx context.Context, namespa
 }
 
 func (r *workspaceRuntime) revokeFinalCleanupRecord(ctx context.Context, account client.Client, secret *corev1.Secret, record *cleanupRecord) error {
+	// Invalidate the identity before grant deletion. Failed account writes must
+	// retain only retry metadata, never a renewable credential.
+	if err := r.prepareCleanupGrantRetry(ctx, secret, record); err != nil {
+		return err
+	}
 	logical := &kcpcorev1alpha1.LogicalCluster{}
 	err := account.Get(ctx, client.ObjectKey{Name: kcpcorev1alpha1.LogicalClusterName}, logical)
 	if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) || err == nil && logical.UID != record.AccountUID {
-		return r.deleteExternalCleanupIdentity(ctx, secret)
+		return r.completeCleanupRecord(ctx, secret, record)
 	}
 	if err != nil {
 		return err
 	}
-	if record.Phase == cleanupServicesFinal {
-		record.Phase = cleanupRevoking
-		if err := r.saveCleanupRecord(ctx, secret, record); err != nil {
-			return err
-		}
-	}
-	err = r.revokeCleanupRecord(ctx, account, secret, record)
-	// Only the durable completion checkpoint makes account denial safe here.
-	if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
-		return r.deleteExternalCleanupIdentity(ctx, secret)
-	}
-	return err
+	return r.revokeCleanupRecord(ctx, account, secret, record)
 }
 
 func (r *workspaceRuntime) revokeCleanupRecord(ctx context.Context, account client.Client, secret *corev1.Secret, record *cleanupRecord) error {
@@ -753,10 +758,33 @@ func (r *workspaceRuntime) revokeCleanupRecord(ctx context.Context, account clie
 			return err
 		}
 	}
-	return r.deleteExternalCleanupIdentity(ctx, secret)
+	return r.completeCleanupRecord(ctx, secret, record)
 }
 
 func (r *workspaceRuntime) deleteExternalCleanupIdentity(ctx context.Context, secret *corev1.Secret) error {
+	record, err := readCleanupRecord(secret)
+	if err != nil {
+		return err
+	}
+	if err := r.prepareCleanupGrantRetry(ctx, secret, record); err != nil {
+		return err
+	}
+	return r.completeCleanupRecord(ctx, secret, record)
+}
+
+func (r *workspaceRuntime) prepareCleanupGrantRetry(ctx context.Context, secret *corev1.Secret, record *cleanupRecord) error {
+	if err := r.deleteExternalCleanupServiceAccount(ctx, secret); err != nil {
+		return err
+	}
+	if record.Phase == cleanupGrantRetry && len(secret.Data) == 1 {
+		return nil
+	}
+	record.Phase = cleanupGrantRetry
+	secret.Data = map[string][]byte{}
+	return r.saveCleanupRecord(ctx, secret, record)
+}
+
+func (r *workspaceRuntime) deleteExternalCleanupServiceAccount(ctx context.Context, secret *corev1.Secret) error {
 	sa := &corev1.ServiceAccount{}
 	key := client.ObjectKey{Namespace: cleanupNamespace, Name: secret.Name}
 	if err := r.cleanupClient.Get(ctx, key, sa); err == nil {
@@ -769,6 +797,26 @@ func (r *workspaceRuntime) deleteExternalCleanupIdentity(ctx context.Context, se
 	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
+	return nil
+}
+
+// Retain the outcome on the platform request before deleting its broker record.
+// The request finalizer can then resume after an independent broker restart.
+func (r *workspaceRuntime) completeCleanupRecord(ctx context.Context, secret *corev1.Secret, record *cleanupRecord) error {
+	ar := &clustersv1alpha1.AccessRequest{}
+	err := r.platform.Client().Get(ctx, client.ObjectKeyFromObject(&record.Request), ar)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if err == nil && ar.UID == record.Request.UID && ar.Annotations[cleanupCompleteAnnotation] != string(ar.UID) {
+		if ar.Annotations == nil {
+			ar.Annotations = map[string]string{}
+		}
+		ar.Annotations[cleanupCompleteAnnotation] = string(ar.UID)
+		if err := r.platform.Client().Update(ctx, ar); err != nil {
+			return err
+		}
+	}
 	return client.IgnoreNotFound(r.cleanupClient.Delete(ctx, secret))
 }
 
@@ -777,8 +825,7 @@ func (r *workspaceRuntime) finalizeCleanupAccess(ctx context.Context, ar *cluste
 	defer r.cleanupMu.Unlock()
 	secret := &corev1.Secret{}
 	if err := r.cleanupClient.Get(ctx, client.ObjectKey{Namespace: cleanupNamespace, Name: cleanupIdentityName(ar)}, secret); apierrors.IsNotFound(err) {
-		_, canonical := r.cleanupProvider(ar)
-		return canonical, nil
+		return ar.UID != "" && ar.Annotations[cleanupCompleteAnnotation] == string(ar.UID), nil
 	} else if err != nil {
 		return true, err
 	}
@@ -793,6 +840,44 @@ func (r *workspaceRuntime) finalizeCleanupAccess(ctx context.Context, ar *cluste
 		}
 	}
 	return true, r.reconcileCleanupRecord(ctx, secret, record)
+}
+
+// Check before finalization removes the requests and their broker records.
+// Mixed or legacy requests still need the generic account access sweep.
+func (r *workspaceRuntime) cleanupRequestsUseBroker(ctx context.Context, namespace string) (bool, error) {
+	if r.cleanupClient == nil {
+		return false, nil
+	}
+	r.cleanupMu.Lock()
+	defer r.cleanupMu.Unlock()
+	requests := &clustersv1alpha1.AccessRequestList{}
+	if err := r.platform.Client().List(ctx, requests, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	if len(requests.Items) == 0 {
+		return false, nil
+	}
+	for i := range requests.Items {
+		ar := &requests.Items[i]
+		if ar.DeletionTimestamp.IsZero() || ar.UID == "" {
+			return false, nil
+		}
+		if ar.Annotations[cleanupCompleteAnnotation] == string(ar.UID) {
+			continue
+		}
+		secret := &corev1.Secret{}
+		if err := r.cleanupClient.Get(ctx, client.ObjectKey{Namespace: cleanupNamespace, Name: cleanupIdentityName(ar)}, secret); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		record, err := readCleanupRecord(secret)
+		if err != nil {
+			return false, err
+		}
+		if record.Request.UID != ar.UID || record.Request.Namespace != ar.Namespace || record.Request.Name != ar.Name {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *workspaceRuntime) cleanupProvidersReady(ctx context.Context, namespace string, deleting bool) error {
@@ -822,6 +907,15 @@ func (r *workspaceRuntime) cleanupProvidersReady(ctx context.Context, namespace 
 }
 
 func (r *workspaceRuntime) releaseCleanupAccessRequest(ctx context.Context, ar *clustersv1alpha1.AccessRequest) error {
+	// Broker completion can update this request independently of the caller.
+	current := &clustersv1alpha1.AccessRequest{}
+	if err := r.platform.Client().Get(ctx, client.ObjectKeyFromObject(ar), current); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if current.UID != ar.UID {
+		return fmt.Errorf("cleanup AccessRequest UID changed before finalizer release")
+	}
+	ar = current
 	if err := r.deleteWorkspaceCredential(ctx, ar); err != nil {
 		return err
 	}

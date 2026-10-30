@@ -60,8 +60,9 @@ Required-group policies must also permit the foreign cleanup identity.
 4. Let the provider remove its service finalizer.
 5. Confirm service absence through the provider credential.
 6. Persist `services-final` before runtime teardown, or persist revocation after the broker observes service absence.
-7. Delete the provider ClusterRoleBinding, then its ClusterRole.
-8. Delete the external ServiceAccount, then the durable Secret record.
+7. Delete the external ServiceAccount and remove the token from the record.
+8. Persist `grant-retry`, then delete the provider ClusterRoleBinding and its ClusterRole.
+9. Save completion on the UID-matched platform AccessRequest, then delete the record.
 
 Before service completion is confirmed, a denied request stops cleanup and retains the record.
 A restart in the revocation phase retries deletion without token renewal or new service grants.
@@ -87,8 +88,18 @@ A native request can then return `Forbidden` even when the LogicalCluster no lon
 The runtime persists `services-final` after its service absence checks and before runtime teardown.
 The broker also persists the revocation phase after its own service absence check.
 These external checkpoints survive account deletion.
-For either completed phase, `Forbidden` or `NotFound` during account grant cleanup permits external identity deletion.
-The broker does not need a successful LogicalCluster read in these phases.
+After a completion checkpoint, the broker first deletes the external ServiceAccount and token material.
+It keeps a token-free `grant-retry` record until it removes the account grants.
+If the LogicalCluster GET returns `Forbidden` or `NotFound`, the broker can remove the retry record.
+If the GET succeeds but grant deletion is denied, it keeps the retry record and tries again.
+A restart in this phase cannot renew the identity.
+
+Before it removes the record, the broker saves completion on the matching platform AccessRequest.
+The AccessRequest finalizer uses that result and does not call legacy account grant cleanup.
+Without this result, an absent broker record keeps the legacy finalization path.
+The runtime skips the generic legacy sweep only when every runtime AccessRequest is terminating and has broker proof.
+The proof is a matching durable record or a completion annotation that matches the request UID.
+Mixed requests and legacy requests keep the sweep and its denial behavior.
 
 Without a completion checkpoint, denial retains the external ServiceAccount and record.
 The code must observe service completion before it can use this rule.
