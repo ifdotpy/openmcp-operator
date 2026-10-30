@@ -456,7 +456,8 @@ func (r *workspaceRuntime) cleanupWorkspaceAccess(name multicluster.ClusterName,
 		}
 		for _, item := range items {
 			obj := item.(client.Object)
-			if owner, ok := obj.GetLabels()[workspaceAccessOwnerLabel]; !ok || strings.HasPrefix(owner, "broker-") {
+			// The broker revokes provider grants after it persists the cleanup phase.
+			if owner, ok := obj.GetLabels()[workspaceAccessOwnerLabel]; !ok || strings.HasPrefix(owner, "broker-") || obj.GetLabels()[cleanupRecordLabel] != "" {
 				continue
 			}
 			if err := c.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {

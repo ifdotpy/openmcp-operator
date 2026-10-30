@@ -59,13 +59,16 @@ Required-group policies must also permit the foreign cleanup identity.
 3. Let the provider complete its final status update.
 4. Let the provider remove its service finalizer.
 5. Confirm service absence through the provider credential.
-6. Persist the revocation phase before the first revoke request.
+6. Persist `services-final` before runtime teardown, or persist revocation after the broker observes service absence.
 7. Delete the provider ClusterRoleBinding, then its ClusterRole.
 8. Delete the external ServiceAccount, then the durable Secret record.
 
-A denied request stops cleanup and retains the record.
+Before service completion is confirmed, a denied request stops cleanup and retains the record.
 A restart in the revocation phase retries deletion without token renewal or new service grants.
 A replaced account or AccessRequest cannot receive the old credential.
+An AccessRequest replacement marks the old record as draining before credential publication.
+After service completion, the broker revokes the old identity without publishing to the replacement.
+Workspace cleanup preserves provider cleanup grants until the broker revokes them.
 The ControlPlane controller uses its own credential for its final update.
 
 The unit tests use real HTTP token and service clients with a local authorization fixture.
@@ -78,14 +81,16 @@ Repeat the lifecycle test against the deployed KCP version before rollout.
 
 ## Account RBAC removal boundary
 
-KCP can remove the account's broker grant after the last service disappears.
-The broker might then receive `Forbidden` before it observes service absence.
-It retains the external ServiceAccount and record because denial does not prove account deletion.
-This can leave final credential revocation pending after the account is gone.
+KCP removes account RBAC after account content deletion.
+A native request can then return `Forbidden` even when the LogicalCluster no longer exists.
 
-The provider binaries release service finalizers outside this repository.
-The operator cannot record a completion acknowledgement before those writes through the current provider API.
-A complete acknowledgement needs a provider runtime change or a broker-owned service finalizer installed before service creation.
-This patch does not add that mechanism.
-Restore broker access to complete revocation when the account still exists.
-Use the dev rollout check to measure this boundary before deployment.
+The runtime persists `services-final` after its service absence checks and before runtime teardown.
+The broker also persists the revocation phase after its own service absence check.
+These external checkpoints survive account deletion.
+For either completed phase, `Forbidden` or `NotFound` during account grant cleanup permits external identity deletion.
+The broker does not need a successful LogicalCluster read in these phases.
+
+Without a completion checkpoint, denial retains the external ServiceAccount and record.
+The code must observe service completion before it can use this rule.
+It does not receive an acknowledgement from the provider before the last service finalizer is removed.
+Real KCP authentication, authorization, and sweep order still require the dev rollout check.

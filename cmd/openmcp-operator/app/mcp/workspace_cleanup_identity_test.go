@@ -525,11 +525,11 @@ func TestCleanupRevocationResumesWithoutRenewal(t *testing.T) {
 	fail := true
 	f.account = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 		if fail {
-			return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), fmt.Errorf("injected revocation denial"))
+			return apierrors.NewInternalError(fmt.Errorf("injected transient revocation failure"))
 		}
 		return c.Delete(ctx, obj, opts...)
 	}})
-	if err := f.r.reconcileCleanupRecords(ctx); !apierrors.IsForbidden(err) {
+	if err := f.r.reconcileCleanupRecords(ctx); !apierrors.IsInternalError(err) {
 		t.Fatalf("lost failed revocation: %v", err)
 	}
 	if err := f.issuer.Get(ctx, client.ObjectKeyFromObject(f.record), f.record); err != nil {
@@ -605,6 +605,14 @@ func TestCleanupRejectsReplacementRequestBeforePublication(t *testing.T) {
 	if err := f.r.reconcileCleanupRecords(ctx); err == nil || !strings.Contains(err.Error(), "UID changed") {
 		t.Fatalf("replacement request accepted: %v", err)
 	}
+	if err := f.issuer.Get(ctx, client.ObjectKeyFromObject(f.record), f.record); err != nil {
+		t.Fatal(err)
+	}
+	record, err := readCleanupRecord(f.record)
+	if err != nil || record.Phase != cleanupDraining {
+		t.Fatalf("replacement did not persist old-record drain: %v", err)
+	}
+
 	if err := f.platform.Get(ctx, key, target); err != nil {
 		t.Fatal(err)
 	}

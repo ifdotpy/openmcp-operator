@@ -443,6 +443,11 @@ func (r *workspaceRuntime) cleanupWorkspace(ctx context.Context, name multiclust
 			waiting = fmt.Errorf("waiting for %s services to finish deletion", gvk.Kind)
 		}
 	}
+	if waiting == nil {
+		if err := r.markCleanupServicesFinal(ctx, runtimeNamespace, workspaceClient); err != nil {
+			return err
+		}
+	}
 	if err := r.reconcileClusterRequestsWithMode(ctx, runtimeNamespace, nil, true); err != nil {
 		return err
 	}

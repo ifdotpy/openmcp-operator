@@ -43,12 +43,13 @@ import (
 var errCleanupServicesRemain = errors.New("cleanup services remain")
 
 const (
-	cleanupNamespace   = "openmcp-cleanup"
-	cleanupRecordLabel = "workspace.openmcp.cloud/cleanup-record"
-	cleanupRecordKey   = "record"
-	cleanupActive      = "active"
-	cleanupDraining    = "draining"
-	cleanupRevoking    = "revoking"
+	cleanupNamespace     = "openmcp-cleanup"
+	cleanupRecordLabel   = "workspace.openmcp.cloud/cleanup-record"
+	cleanupRecordKey     = "record"
+	cleanupActive        = "active"
+	cleanupDraining      = "draining"
+	cleanupRevoking      = "revoking"
+	cleanupServicesFinal = "services-final"
 )
 
 // cleanupRecord has no owner in the account or runtime namespace. The immutable
@@ -259,7 +260,7 @@ func readCleanupRecord(secret *corev1.Secret) (*cleanupRecord, error) {
 		return nil, fmt.Errorf("invalid cleanup record %s", secret.Name)
 	}
 	switch record.Phase {
-	case cleanupActive, cleanupDraining, cleanupRevoking:
+	case cleanupActive, cleanupDraining, cleanupServicesFinal, cleanupRevoking:
 	default:
 		return nil, fmt.Errorf("unknown cleanup phase %q", record.Phase)
 	}
@@ -602,6 +603,9 @@ func (r *workspaceRuntime) reconcileCleanupRecord(ctx context.Context, secret *c
 	if err != nil {
 		return err
 	}
+	if record.Phase == cleanupServicesFinal || record.Phase == cleanupRevoking {
+		return r.revokeFinalCleanupRecord(ctx, account, secret, record)
+	}
 	logical := &kcpcorev1alpha1.LogicalCluster{}
 	err = account.Get(ctx, client.ObjectKey{Name: kcpcorev1alpha1.LogicalClusterName}, logical)
 	if apierrors.IsNotFound(err) || (err == nil && logical.UID != record.AccountUID) {
@@ -611,8 +615,15 @@ func (r *workspaceRuntime) reconcileCleanupRecord(ctx context.Context, secret *c
 	if err != nil {
 		return err
 	}
-	if record.Phase == cleanupRevoking {
-		return r.revokeCleanupRecord(ctx, account, secret, record)
+	draining, err := r.cleanupRequested(ctx, account, record, logical)
+	if err != nil {
+		return err
+	}
+	if draining && record.Phase == cleanupActive {
+		record.Phase = cleanupDraining
+		if err := r.saveCleanupRecord(ctx, secret, record); err != nil {
+			return err
+		}
 	}
 	if err := r.refreshCleanupCredential(ctx, secret, record); err != nil {
 		return err
@@ -626,27 +637,18 @@ func (r *workspaceRuntime) reconcileCleanupRecord(ctx context.Context, secret *c
 			return err
 		}
 	}
-	if err := r.publishCleanupCredential(ctx, secret, record); err != nil {
-		return err
-	}
-	draining, err := r.cleanupRequested(ctx, account, record, logical)
-	if err != nil {
-		return err
-	}
-	if !draining && record.Phase == cleanupActive {
-		return nil
-	}
 	if record.Phase == cleanupActive {
-		record.Phase = cleanupDraining
-		if err := r.saveCleanupRecord(ctx, secret, record); err != nil {
-			return err
-		}
+		return r.publishCleanupCredential(ctx, secret, record)
 	}
+
 	scoped, err := r.cleanupAccountClient(record, secret.Data[clustersv1alpha1.SecretKeyKubeconfig])
 	if err != nil {
 		return err
 	}
 	if err := cleanupServicesGone(ctx, scoped, record); err != nil {
+		if errors.Is(err, errCleanupServicesRemain) {
+			return errors.Join(err, r.publishCleanupCredential(ctx, secret, record))
+		}
 		return err
 	}
 	// Persist the irrevocable phase first. Restart must not renew or regrant here.
@@ -654,7 +656,7 @@ func (r *workspaceRuntime) reconcileCleanupRecord(ctx context.Context, secret *c
 	if err := r.saveCleanupRecord(ctx, secret, record); err != nil {
 		return err
 	}
-	return r.revokeCleanupRecord(ctx, account, secret, record)
+	return r.revokeFinalCleanupRecord(ctx, account, secret, record)
 }
 
 func (r *workspaceRuntime) cleanupRequested(ctx context.Context, account client.Client, record *cleanupRecord, logical *kcpcorev1alpha1.LogicalCluster) (bool, error) {
@@ -673,7 +675,65 @@ func (r *workspaceRuntime) cleanupRequested(ctx context.Context, account client.
 	if namespaceErr != nil && !apierrors.IsNotFound(namespaceErr) {
 		return false, namespaceErr
 	}
-	return apierrors.IsNotFound(namespaceErr) || !runtimeNamespace.DeletionTimestamp.IsZero() || !logical.DeletionTimestamp.IsZero() || apierrors.IsNotFound(requestErr) || !ar.DeletionTimestamp.IsZero() || ar.UID != record.Request.UID || apierrors.IsNotFound(bindingErr) || !binding.DeletionTimestamp.IsZero() || binding.UID != record.Binding.UID, nil
+	return apierrors.IsNotFound(namespaceErr) || runtimeNamespace.UID != record.RuntimeUID || !runtimeNamespace.DeletionTimestamp.IsZero() || !logical.DeletionTimestamp.IsZero() || apierrors.IsNotFound(requestErr) || !ar.DeletionTimestamp.IsZero() || ar.UID != record.Request.UID || apierrors.IsNotFound(bindingErr) || !binding.DeletionTimestamp.IsZero() || binding.UID != record.Binding.UID, nil
+}
+
+// The runtime persists service completion before it tears down the runtime.
+// This checkpoint remains readable after KCP removes the account's RBAC.
+func (r *workspaceRuntime) markCleanupServicesFinal(ctx context.Context, namespace string, workspace client.Client) error {
+	if r.cleanupClient == nil {
+		return nil
+	}
+	r.cleanupMu.Lock()
+	defer r.cleanupMu.Unlock()
+	list := &corev1.SecretList{}
+	if err := r.cleanupClient.List(ctx, list, client.InNamespace(cleanupNamespace), client.MatchingLabels{cleanupRecordLabel: labelValueTrue}); err != nil {
+		return err
+	}
+	records := map[int]*cleanupRecord{}
+	for i := range list.Items {
+		record, err := readCleanupRecord(&list.Items[i])
+		if err != nil {
+			return err
+		}
+		if record.Request.Namespace != namespace || record.Phase == cleanupServicesFinal || record.Phase == cleanupRevoking {
+			continue
+		}
+		if err := cleanupServicesGone(ctx, workspace, record); err != nil {
+			return err
+		}
+		records[i] = record
+	}
+	for i, record := range records {
+		record.Phase = cleanupServicesFinal
+		if err := r.saveCleanupRecord(ctx, &list.Items[i], record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *workspaceRuntime) revokeFinalCleanupRecord(ctx context.Context, account client.Client, secret *corev1.Secret, record *cleanupRecord) error {
+	logical := &kcpcorev1alpha1.LogicalCluster{}
+	err := account.Get(ctx, client.ObjectKey{Name: kcpcorev1alpha1.LogicalClusterName}, logical)
+	if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) || err == nil && logical.UID != record.AccountUID {
+		return r.deleteExternalCleanupIdentity(ctx, secret)
+	}
+	if err != nil {
+		return err
+	}
+	if record.Phase == cleanupServicesFinal {
+		record.Phase = cleanupRevoking
+		if err := r.saveCleanupRecord(ctx, secret, record); err != nil {
+			return err
+		}
+	}
+	err = r.revokeCleanupRecord(ctx, account, secret, record)
+	// Only the durable completion checkpoint makes account denial safe here.
+	if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
+		return r.deleteExternalCleanupIdentity(ctx, secret)
+	}
+	return err
 }
 
 func (r *workspaceRuntime) revokeCleanupRecord(ctx context.Context, account client.Client, secret *corev1.Secret, record *cleanupRecord) error {
