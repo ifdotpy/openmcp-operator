@@ -52,6 +52,8 @@ const (
 	cleanupServicesFinal      = "services-final"
 	cleanupGrantRetry         = "grant-retry"
 	cleanupCompleteAnnotation = "workspace.openmcp.cloud/cleanup-complete"
+	cleanupLegacyPending      = "legacy-pending"
+	cleanupLegacyRevoked      = "legacy-revoked"
 )
 
 // cleanupRecord has no owner in the account or runtime namespace. The immutable
@@ -68,6 +70,7 @@ type cleanupRecord struct {
 	Binding     metav1.OwnerReference          `json:"binding"`
 	Phase       string                         `json:"phase"`
 	Ready       bool                           `json:"ready"`
+	LegacyState string                         `json:"legacyState,omitempty"`
 }
 
 func cleanupIdentityName(ar *clustersv1alpha1.AccessRequest) string {
@@ -312,6 +315,9 @@ func (r *workspaceRuntime) reconcileCleanupAccess(ctx context.Context, workspace
 	if providerObject.UID != record.ProviderUID {
 		return fmt.Errorf("cleanup ServiceProvider UID changed")
 	}
+	if err := r.observeCleanupLegacyAccess(ctx, workspace, secret, record); err != nil {
+		return err
+	}
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: secret.Name, Namespace: cleanupNamespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.cleanupClient, sa, func() error {
 		if sa.ResourceVersion != "" && sa.Labels[cleanupRecordLabel] != secret.Name {
@@ -339,6 +345,9 @@ func (r *workspaceRuntime) reconcileCleanupAccess(ctx context.Context, workspace
 		return err
 	}
 	if err := r.publishCleanupCredential(ctx, secret, record); err != nil {
+		return err
+	}
+	if err := r.revokeCleanupLegacyAccess(ctx, workspace, secret, record); err != nil {
 		return err
 	}
 	old := ar.DeepCopy()
@@ -707,7 +716,7 @@ func (r *workspaceRuntime) markCleanupServicesFinal(ctx context.Context, namespa
 		if err != nil {
 			return err
 		}
-		if record.Request.Namespace != namespace || cleanupFinalPhase(record.Phase) {
+		if record.Request.Namespace != namespace || cleanupFinalPhase(record.Phase) && record.LegacyState == cleanupLegacyRevoked {
 			continue
 		}
 		if err := cleanupServicesGone(ctx, workspace, record); err != nil {
@@ -716,6 +725,9 @@ func (r *workspaceRuntime) markCleanupServicesFinal(ctx context.Context, namespa
 		records[i] = record
 	}
 	for i, record := range records {
+		if err := r.revokeCleanupLegacyAccess(ctx, workspace, &list.Items[i], record); err != nil {
+			return err
+		}
 		record.Phase = cleanupServicesFinal
 		if err := r.saveCleanupRecord(ctx, &list.Items[i], record); err != nil {
 			return err
@@ -773,6 +785,9 @@ func (r *workspaceRuntime) deleteExternalCleanupIdentity(ctx context.Context, se
 }
 
 func (r *workspaceRuntime) prepareCleanupGrantRetry(ctx context.Context, secret *corev1.Secret, record *cleanupRecord) error {
+	if record.LegacyState != cleanupLegacyRevoked {
+		return fmt.Errorf("legacy cleanup is pending; retain broker access and restore account access before teardown")
+	}
 	if err := r.deleteExternalCleanupServiceAccount(ctx, secret); err != nil {
 		return err
 	}
@@ -820,7 +835,7 @@ func (r *workspaceRuntime) completeCleanupRecord(ctx context.Context, secret *co
 	return client.IgnoreNotFound(r.cleanupClient.Delete(ctx, secret))
 }
 
-func (r *workspaceRuntime) finalizeCleanupAccess(ctx context.Context, ar *clustersv1alpha1.AccessRequest) (bool, error) {
+func (r *workspaceRuntime) finalizeCleanupAccess(ctx context.Context, workspace client.Client, ar *clustersv1alpha1.AccessRequest) (bool, error) {
 	r.cleanupMu.Lock()
 	defer r.cleanupMu.Unlock()
 	secret := &corev1.Secret{}
@@ -832,6 +847,14 @@ func (r *workspaceRuntime) finalizeCleanupAccess(ctx context.Context, ar *cluste
 	record, err := readCleanupRecord(secret)
 	if err != nil {
 		return true, err
+	}
+	if record.LegacyState != cleanupLegacyRevoked {
+		if err := cleanupServicesGone(ctx, workspace, record); err != nil {
+			return true, err
+		}
+		if err := r.revokeCleanupLegacyAccess(ctx, workspace, secret, record); err != nil {
+			return true, err
+		}
 	}
 	if record.Phase == cleanupActive {
 		record.Phase = cleanupDraining
@@ -873,7 +896,7 @@ func (r *workspaceRuntime) cleanupRequestsUseBroker(ctx context.Context, namespa
 		if err != nil {
 			return false, err
 		}
-		if record.Request.UID != ar.UID || record.Request.Namespace != ar.Namespace || record.Request.Name != ar.Name {
+		if record.Request.UID != ar.UID || record.Request.Namespace != ar.Namespace || record.Request.Name != ar.Name || record.LegacyState != cleanupLegacyRevoked {
 			return false, nil
 		}
 	}

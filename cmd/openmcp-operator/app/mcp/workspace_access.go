@@ -504,7 +504,7 @@ func (r *workspaceRuntime) finalizeWorkspaceAccess(ctx context.Context, workspac
 		return nil
 	}
 	if r.cleanupClient != nil {
-		handled, err := r.finalizeCleanupAccess(ctx, ar)
+		handled, err := r.finalizeCleanupAccess(ctx, workspaceClient, ar)
 		if err != nil {
 			return err
 		}

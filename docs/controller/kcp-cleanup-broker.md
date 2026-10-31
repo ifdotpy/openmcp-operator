@@ -105,3 +105,18 @@ Without a completion checkpoint, denial retains the external ServiceAccount and 
 The code must observe service completion before it can use this rule.
 It does not receive an acknowledgement from the provider before the last service finalizer is removed.
 Real KCP authentication, authorization, and sweep order still require the dev rollout check.
+
+## Migration from account-local credentials
+
+A broker record tracks `legacy-pending` until the old account-local identity is revoked.
+Records without migration state require this check before broker completion.
+The active runtime publishes the external credential before it revokes the old credential.
+It uses the engaged account client to remove both old ServiceAccounts, the issuer Secret, the legacy grants, and their namespace.
+It preserves the external provider cleanup grants.
+Only successful legacy revocation permits `legacy-revoked` and the broker-only sweep skip.
+
+A denied legacy deletion retains pending work, the external identity, and the request finalizer.
+The permanent broker cannot remove legacy objects through its restricted native grant.
+The runtime must retry with valid account access before teardown can complete.
+A fresh broker request verifies legacy absence once.
+After that check, completed broker requests can still finish when account claims are withdrawn.
